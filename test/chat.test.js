@@ -465,6 +465,26 @@ test("uses Vercel's request id for log correlation when present", async () => {
   assert.equal(JSON.parse(logs.out[0]).requestId, "bom1::abc");
 });
 
+test("createHandler runs the identical flow with another model; the default export stays on the configured one", async () => {
+  const { createHandler } = await import("../api/chat.js");
+  const run = async (h) => {
+    const res = { headers: {}, setHeader() {}, status(c) { this.statusCode = c; return this; }, json(p) { this.payload = p; return this; } };
+    await h({ method: "POST", body: HI.body }, res);
+    return res;
+  };
+
+  mockUpstream(ok("from other model"));
+  const other = await run(createHandler("laguna-s-2.1"));
+  assert.equal(other.payload.model, "laguna-s-2.1");
+  assert.equal(upstreamCalls[0].body.model, "laguna-s-2.1");
+  assert.equal(upstreamCalls[0].body.reasoning_effort, CONFIGURED_EFFORT);
+  assert.equal(upstreamCalls[0].body.max_tokens, 1000);
+
+  mockUpstream(ok("default"));
+  await call(HI); // the default export
+  assert.equal(upstreamCalls[0].body.model, "nemotron-3.5-lightning-free");
+});
+
 test("caps output at 1000 tokens", async () => {
   mockUpstream(ok("ok"));
   await call(HI);

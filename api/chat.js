@@ -156,7 +156,7 @@ async function attemptOnce({ baseUrl, apiKey, messages, meta }) {
         Accept: "application/json",
       },
       body: JSON.stringify({
-        model: MODEL,
+        model: meta.model,
         messages,
         temperature: 0.35,
         max_tokens: MAX_OUTPUT_TOKENS,
@@ -268,7 +268,7 @@ async function callModel({ baseUrl, apiKey, messages, meta }) {
   throw lastError;
 }
 
-export default async function handler(req, res) {
+async function handleChat(req, res, model) {
   res.setHeader("Cache-Control", "no-store");
 
   if (req.method !== "POST") {
@@ -294,7 +294,7 @@ export default async function handler(req, res) {
   const requestId = req.headers?.["x-vercel-id"] || randomUUID();
   const meta = {
     requestId,
-    model: MODEL,
+    model,
     reasoningEffort: REASONING_EFFORT,
     historyMessages: history.length,
     startedAt: Date.now(),
@@ -305,7 +305,7 @@ export default async function handler(req, res) {
     meta.outcome = "ok";
     meta.replyChars = reply.length;
     logRequest(meta);
-    return res.status(200).json({ reply, model: MODEL });
+    return res.status(200).json({ reply, model });
   } catch (error) {
     meta.outcome = error.code;
     logRequest(meta);
@@ -314,3 +314,8 @@ export default async function handler(req, res) {
       .json({ error: error.message, code: error.code, requestId, detail: meta.errorDetail });
   }
 }
+
+// /api/chat always uses the configured MODEL. createHandler exists so tests (and the
+// model comparison) can run the identical flow with a different model.
+export const createHandler = (model) => (req, res) => handleChat(req, res, model);
+export default createHandler(MODEL);
