@@ -106,7 +106,12 @@ function sanitizeHistory(incoming) {
 // model is told so, otherwise it tends to re-run the same list, reasoning and question.
 const MIN_REPEAT_CHARS = 10; // shorter replies ("yes", "chlorine") are legitimately reused
 
-const REPEATED_MESSAGE_NOTE = `IMPORTANT - REPEATED MESSAGE: The customer's latest message is word-for-word the same as one they already sent earlier in this conversation, and you already answered it. Do not repeat your earlier answer, list, explanation or reasoning. Do not ask any question you have already asked, even reworded. Begin with a brief, warm acknowledgement that does not sound like a correction (for example: "Thanks, I've got that."), then move forward using everything already known. If your last reply ended with a question the customer has not answered, do not ask it again: give your best recommendation from what you already know and ask ONE new, more specific question. If your last reply already gave a full recommendation, do not repeat it: briefly offer the next helpful step instead. If the message is a short reply that plausibly answers a newer question than before, just continue normally.`;
+const REPEATED_MESSAGE_NOTE = `IMPORTANT - REPEATED MESSAGE: The customer's latest message is word-for-word the same as one they already sent earlier in this conversation, and you already answered it. Treat it as a cue to move the conversation forward, not to answer again.
+- Begin with a brief, warm acknowledgement that does not sound like a correction (for example: "Thanks, I've got that.").
+- Do NOT repeat or restate anything you already told them: do not re-list tests or parameters, do not repeat your reasoning, do not summarise your earlier recommendation. At most point back to it in a few words (for example: "the tests I listed above").
+- Do NOT ask any question you have already asked, even reworded.
+- Then add something NEW and useful: ONE different, more specific question you have not asked yet, or a concrete next step (for example how to collect a sample, which result to look out for, or which test format suits them). Only if you have not yet given any recommendation, give your best one now from what you know.
+- If the message is a short reply that plausibly answers a newer question than before, just continue normally.`;
 
 // Compare ignoring case, spacing and surrounding punctuation.
 const normalizeForCompare = (text) =>
