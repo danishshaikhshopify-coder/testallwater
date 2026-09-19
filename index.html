@@ -67,6 +67,17 @@ body{
 .tw-bubble{max-width:min(720px,78%);font-size:14px;line-height:1.68;padding:14px 16px;border-radius:17px;background:#fff;border:1px solid #e3e9ed;box-shadow:0 5px 18px rgba(25,48,65,.045);white-space:pre-wrap}
 .tw-row.user .tw-bubble{background:linear-gradient(135deg,var(--brand),#0872bd);color:#fff;border-color:transparent;border-bottom-right-radius:5px;box-shadow:0 7px 18px rgba(10,95,159,.16)}
 .tw-row.assistant .tw-bubble{border-bottom-left-radius:5px}
+/* Rendered Markdown inside assistant bubbles (same palette; nothing else changes) */
+.tw-bubble.md{white-space:normal}
+.tw-bubble.md>:first-child{margin-top:0}.tw-bubble.md>:last-child{margin-bottom:0}
+.tw-bubble.md p{margin:0 0 .65em}
+.tw-bubble.md ul,.tw-bubble.md ol{margin:.15em 0 .65em;padding-left:1.3em}
+.tw-bubble.md li{margin:.2em 0}.tw-bubble.md li>ul,.tw-bubble.md li>ol{margin:.2em 0}
+.tw-bubble.md code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.9em;background:#eef4f8;border-radius:6px;padding:.1em .38em}
+.tw-bubble.md pre{margin:.3em 0 .65em;padding:11px 13px;background:#f1f6f9;border:1px solid #e3e9ed;border-radius:11px;overflow:auto;white-space:pre}
+.tw-bubble.md pre code{background:none;padding:0;font-size:.88em}
+.tw-bubble.md a{color:var(--brand);text-decoration:underline;text-underline-offset:2px}
+.tw-bubble.md hr{border:0;border-top:1px solid var(--line);margin:.8em 0}
 .tw-welcome{padding:17px 18px;border:1px solid #dcecf5;background:linear-gradient(135deg,#f6fbfe,#fff);border-radius:18px;margin:2px 0 24px}
 .tw-welcome b{font-family:"Plus Jakarta Sans";font-size:14px}.tw-welcome p{font-size:13px;color:#71808b;line-height:1.65;margin:7px 0 0}
 .tw-quick{padding:11px 22px 6px;display:flex;gap:8px;flex-wrap:wrap;background:#fff;border-top:1px solid var(--line)}
@@ -125,10 +136,153 @@ body{
 <script>
 const panel=document.getElementById('panel'),messages=document.getElementById('messages'),input=document.getElementById('input'),send=document.getElementById('send'),typing=document.getElementById('typing'),status=document.getElementById('status');
 let busy=false,history=[];
+/*<render>*/
+/* Markdown -> DOM. SAFETY: this only ever calls createElement / createTextNode /
+   textContent / setAttribute on a fixed whitelist (p strong em code pre ul ol li a br hr).
+   It never uses innerHTML, so model output cannot inject markup or scripts; anything it
+   does not understand is shown as plain text. Links must be http(s). */
+const MD_ESCAPABLE=/[\\`*_{}\[\]()#+\-.!|>~<&"']/;
+const MD_SAFE_URL=/^https?:\/\/[^\s<>"']+$/i;
+function mdFindClose(s,from,mk){
+ for(let j=from;j<s.length;j++){
+  const c=s[j];
+  if(c==="\\"){j++;continue}
+  if(c==="`"){let n=1;while(s[j+n]==="`")n++;const e=s.indexOf("`".repeat(n),j+n);if(e>0){j=e+n-1;continue}}
+  if(mk.length===1&&c===mk&&s[j+1]===mk){j++;continue} /* a doubled marker inside single-marker emphasis is nested bold */
+  if(s.startsWith(mk,j)&&j>from&&!/\s/.test(s[j-1])&&(mk[0]==="*"||!/[A-Za-z0-9]/.test(s[j+mk.length]||""))){
+   return j;
+  }
+ }
+ return -1;
+}
+function mdInline(s){
+ const out=[];let buf="";let i=0;
+ const flush=()=>{if(buf){out.push({t:"text",v:buf});buf=""}};
+ while(i<s.length){
+  const c=s[i];
+  if(c==="\\"&&i+1<s.length&&MD_ESCAPABLE.test(s[i+1])){buf+=s[i+1];i+=2;continue}
+  if(c==="`"){
+   let n=1;while(s[i+n]==="`")n++;
+   const fence="`".repeat(n),end=s.indexOf(fence,i+n);
+   if(end>i+n){flush();out.push({t:"code",v:s.slice(i+n,end).replace(/^ (.+) $/,"$1")});i=end+n;continue}
+   buf+=fence;i+=n;continue;
+  }
+  if(c==="["){
+   const m=/^\[([^\]\n]+)\]\(([^\s)]+)\)/.exec(s.slice(i));
+   if(m){
+    if(MD_SAFE_URL.test(m[2])){flush();out.push({t:"link",href:m[2],c:mdInline(m[1])})}
+    else buf+=m[0];
+    i+=m[0].length;continue;
+   }
+  }
+  if(c==="*"||c==="_"){
+   const startsWord=c==="*"||!/[A-Za-z0-9]/.test(s[i-1]||"");
+   const run=s.startsWith(c.repeat(3),i)?3:s.startsWith(c+c,i)?2:1;
+   const start=i+run;
+   if(startsWord&&start<s.length&&!/\s/.test(s[start])){
+    const end=mdFindClose(s,start,c.repeat(run));
+    if(end>start){
+     flush();
+     const inner=mdInline(s.slice(start,end));
+     out.push(run===3?{t:"strong",c:[{t:"em",c:inner}]}:{t:run===2?"strong":"em",c:inner});
+     i=end+run;continue;
+    }
+   }
+   buf+=c.repeat(run);i+=run;continue;
+  }
+  buf+=c;i++;
+ }
+ flush();return out;
+}
+function mdAppendInline(nodes,doc,parent){
+ for(const n of nodes){
+  if(n.t==="text")parent.appendChild(doc.createTextNode(n.v));
+  else if(n.t==="code"){const e=doc.createElement("code");e.textContent=n.v;parent.appendChild(e)}
+  else if(n.t==="link"){
+   const e=doc.createElement("a");
+   e.setAttribute("href",n.href);e.setAttribute("target","_blank");e.setAttribute("rel","noopener noreferrer nofollow");
+   mdAppendInline(n.c,doc,e);parent.appendChild(e);
+  }else{const e=doc.createElement(n.t);mdAppendInline(n.c,doc,e);parent.appendChild(e)}
+ }
+}
+function mdAppendLines(text,doc,parent){
+ text.split("\n").forEach((line,k)=>{
+  if(k)parent.appendChild(doc.createElement("br"));
+  mdAppendInline(mdInline(line),doc,parent);
+ });
+}
+function mdList(items,doc,parent){
+ const make=it=>{const l=doc.createElement(it.ordered?"ol":"ul");if(it.ordered&&it.num!==1)l.setAttribute("start",String(it.num));return l};
+ const root=make(items[0]);parent.appendChild(root);
+ const stack=[{indent:items[0].indent,el:root,lastLi:null}];
+ for(const it of items){
+  while(stack.length>1&&it.indent<stack[stack.length-1].indent)stack.pop();
+  let top=stack[stack.length-1];
+  if(it.indent>top.indent&&top.lastLi){
+   const sub=make(it);top.lastLi.appendChild(sub);
+   top={indent:it.indent,el:sub,lastLi:null};stack.push(top);
+  }
+  const li=doc.createElement("li");mdAppendLines(it.text,doc,li);
+  top.el.appendChild(li);top.lastLi=li;
+ }
+}
+function renderMarkdown(text,doc,parent){
+ const lines=String(text).replace(/\r\n?/g,"\n").split("\n");
+ const blank=l=>/^\s*$/.test(l);
+ const fenceRe=/^\s{0,3}(`{3,}|~{3,})[^`]*$/,headRe=/^\s{0,3}#{1,6}\s+(.*?)\s*#*\s*$/;
+ const hrRe=/^\s{0,3}([-*_])(?:\s*\1){2,}\s*$/,listRe=/^(\s*)([-*+]|\d{1,9}[.)])\s+(.*)$/;
+ const isItem=l=>listRe.test(l)&&!hrRe.test(l);
+ const blockStart=l=>fenceRe.test(l)||headRe.test(l)||hrRe.test(l)||isItem(l);
+ let i=0;
+ while(i<lines.length){
+  const line=lines[i];
+  if(blank(line)){i++;continue}
+  const fence=fenceRe.exec(line);
+  if(fence){
+   const marker=fence[1],code=[];i++;
+   const closes=l=>{const t=l.trim();return t.length>=marker.length&&t===t[0].repeat(t.length)&&t[0]===marker[0]};
+   while(i<lines.length&&!closes(lines[i]))code.push(lines[i++]);
+   i++; // skip the closing fence (or run off the end if it never closes)
+   const pre=doc.createElement("pre"),c=doc.createElement("code");
+   c.textContent=code.join("\n");pre.appendChild(c);parent.appendChild(pre);continue;
+  }
+  const head=headRe.exec(line);
+  if(head){
+   const p=doc.createElement("p"),b=doc.createElement("strong");
+   mdAppendInline(mdInline(head[1]),doc,b);p.appendChild(b);parent.appendChild(p);i++;continue;
+  }
+  if(hrRe.test(line)){parent.appendChild(doc.createElement("hr"));i++;continue}
+  if(isItem(line)){
+   const items=[];
+   while(i<lines.length){
+    const l=lines[i],m=isItem(l)?listRe.exec(l):null;
+    if(m){items.push({indent:m[1].replace(/\t/g,"    ").length,ordered:/\d/.test(m[2]),num:parseInt(m[2],10),text:m[3]});i++;continue}
+    if(blank(l)){let j=i;while(j<lines.length&&blank(lines[j]))j++;if(j<lines.length&&isItem(lines[j])){i=j;continue}break}
+    if(/^\s+\S/.test(l)&&!blockStart(l)){items[items.length-1].text+="\n"+l.trim();i++;continue}
+    break;
+   }
+   mdList(items,doc,parent);continue;
+  }
+  const para=[line];i++;
+  while(i<lines.length&&!blank(lines[i])&&!blockStart(lines[i]))para.push(lines[i++]);
+  const p=doc.createElement("p");mdAppendLines(para.map(l=>l.trim()).join("\n"),doc,p);parent.appendChild(p);
+ }
+}
+/* Customer-facing error copy. Raw server/technical messages go to the console only. */
+function friendlyError(e){
+ if(e?.name==="AbortError"||e?.code==="timeout"||e?.status===504)
+  return "Sorry, that took longer than expected and I couldn't get an answer in time. Please send your message again — our conversation is still here, so you won't need to start over.";
+ if(e?.code==="rate_limited"||e?.status===429)
+  return "I'm getting a lot of questions right now. Please try again in a moment.";
+ return "Sorry, something went wrong on my side and I couldn't answer that. Please try again.";
+}
+/*</render>*/
 function addMessage(role,text){
  const row=document.createElement('div');row.className='tw-row '+role;
  if(role==='assistant'){const av=document.createElement('div');av.className='tw-avatar';av.textContent='AI';row.appendChild(av)}
- const bubble=document.createElement('div');bubble.className='tw-bubble';bubble.textContent=text;row.appendChild(bubble);
+ const bubble=document.createElement('div');bubble.className='tw-bubble';
+ if(role==='assistant'){bubble.classList.add('md');renderMarkdown(text,document,bubble)}else bubble.textContent=text;
+ row.appendChild(bubble);
  messages.appendChild(row);requestAnimationFrame(()=>messages.scrollTop=messages.scrollHeight);
 }
 function setBusy(v){busy=v;send.disabled=v;input.disabled=v;typing.classList.toggle('show',v)}
@@ -147,17 +301,19 @@ async function ask(text){
     signal:controller.signal
   });
   const data=await res.json().catch(e=>{if(e?.name==="AbortError")throw e;return {}});
-  if(!res.ok) throw new Error(data?.error||`Server error (${res.status})`);
+  if(!res.ok){
+   const err=new Error(data?.error||`Server error (${res.status})`);
+   err.status=res.status;err.code=data?.code;throw err;
+  }
   const reply=data?.reply?.trim();
   if(!reply) throw new Error("The AI returned an empty response.");
   history.push({role:"assistant",content:reply});
   addMessage("assistant",reply);
  }catch(e){
+  /* The failed exchange is not added to history as an assistant turn, so the next message
+     continues the conversation normally; the server treats a resent message as unanswered. */
   console.error("AI request failed:",e);
-  const msg=e?.name==="AbortError"
-    ?"The AI took too long to respond."
-    :(e?.message||"Unknown API error");
-  addMessage("assistant","AI request failed:\n"+msg+(/try again/i.test(msg)?"":"\n\nPlease try again."));
+  addMessage("assistant",friendlyError(e));
  }finally{
   clearTimeout(timer);
   setBusy(false);input.focus();

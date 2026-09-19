@@ -493,6 +493,103 @@ test("leaves every other reply untouched (prose, JSON without a usable message, 
   }
 });
 
+// --- Repeated messages ---------------------------------------------------------------
+
+const MSG = "My pool water is cloudy and I use chlorine";
+const u = (content) => ({ role: "user", content });
+const a = (content) => ({ role: "assistant", content });
+const sentRoles = () => upstreamCalls[0].body.messages.map((m) => m.role[0]).join("");
+const sentSystem = () => upstreamCalls[0].body.messages[0].content;
+
+test("the same message sent again after an answer is flagged to the model as a repeat", async () => {
+  mockUpstream(ok("ok"));
+  const res = await call({ body: { messages: [u(MSG), a("Which test kit do you have?"), u(MSG)] } });
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(sentRoles(), "suau"); // history untouched, still exactly one system message
+  assert.match(sentSystem(), /REPEATED MESSAGE/);
+  assert.match(sentSystem(), /Do not repeat your earlier answer/);
+  assert.match(sentSystem(), /TestAllWater/); // the normal system prompt is still there
+  assert.equal(JSON.parse(logs.out[0]).repeatedMessage, true);
+});
+
+test("a first-time message is not flagged, and the base prompt tells the model to use the conversation", async () => {
+  mockUpstream(ok("ok"));
+  await call({ body: { messages: [u(MSG)] } });
+  assert.doesNotMatch(sentSystem(), /REPEATED MESSAGE/);
+  assert.match(sentSystem(), /Use the whole conversation/);
+  assert.match(sentSystem(), /If the customer repeats themselves/);
+  assert.equal(JSON.parse(logs.out[0]).repeatedMessage, undefined);
+});
+
+test("repeat detection ignores case, spacing and end punctuation, and finds non-adjacent repeats", async () => {
+  for (const again of ["  my POOL water   is cloudy and i use chlorine!! ", "My pool water is cloudy and I use chlorine."]) {
+    mockUpstream(ok("ok"));
+    await call({ body: { messages: [u(MSG), a("Which kit?"), u(again)] } });
+    assert.match(sentSystem(), /REPEATED MESSAGE/, `not detected: ${again}`);
+  }
+
+  mockUpstream(ok("ok"));
+  await call({ body: { messages: [u(MSG), a("Which kit?"), u("It is green too"), a("Since when?"), u(MSG)] } });
+  assert.match(sentSystem(), /REPEATED MESSAGE/);
+});
+
+test("different messages, and short replies like 'yes', are never flagged", async () => {
+  const cases = [
+    [u(MSG), a("Which kit?"), u("My pool water is cloudy and I use bromine")],
+    [u("yes"), a("Is it outdoors?"), u("yes")],
+    [u("chlorine"), a("Is it outdoors?"), u("Chlorine")],
+  ];
+  for (const messages of cases) {
+    mockUpstream(ok("ok"));
+    await call({ body: { messages } });
+    assert.doesNotMatch(sentSystem(), /REPEATED MESSAGE/);
+  }
+});
+
+test("a message resent after a failure (no AI reply in between) is sent once and not flagged", async () => {
+  mockUpstream(ok("ok"));
+  await call({ body: { messages: [u(MSG), u(MSG)] } });
+  assert.equal(sentRoles(), "su", "the unanswered first copy is collapsed");
+  assert.doesNotMatch(sentSystem(), /REPEATED MESSAGE/);
+  const entry = JSON.parse(logs.out[0]);
+  assert.equal(entry.droppedUnansweredRepeats, 1);
+  assert.equal(entry.repeatedMessage, undefined);
+
+  // three failed attempts in a row collapse to one
+  mockUpstream(ok("ok"));
+  await call({ body: { messages: [u(MSG), u(MSG), u(MSG)] } });
+  assert.equal(sentRoles(), "su");
+
+  // a resend after an earlier answered turn: context kept, still not a repeat
+  mockUpstream(ok("ok"));
+  await call({ body: { messages: [u("first"), a("hello"), u(MSG), u(MSG)] } });
+  assert.equal(sentRoles(), "suau");
+  assert.doesNotMatch(sentSystem(), /REPEATED MESSAGE/);
+});
+
+test("a different message after a failed one keeps the failed message as context", async () => {
+  mockUpstream(ok("ok"));
+  await call({ body: { messages: [u(MSG), u("It has been green for 3 days")] } });
+  assert.equal(sentRoles(), "suu");
+  assert.equal(upstreamCalls[0].body.messages[1].content, MSG);
+});
+
+test("timeout recovery: after a double timeout the next request succeeds normally", async () => {
+  mockSequence("stall", "stall", ok("recovered"));
+  const failed = await callAdvancing([9000, 9000], { body: { messages: [u(MSG)] } });
+  assert.equal(failed.statusCode, 504);
+  assert.equal(failed.payload.code, "timeout");
+  assert.equal(upstreamCalls.length, 2);
+
+  // the customer just sends it again
+  const retried = await call({ body: { messages: [u(MSG), u(MSG)] } });
+  assert.equal(retried.statusCode, 200);
+  assert.equal(retried.payload.reply, "recovered");
+  assert.equal(upstreamCalls[2].body.messages.map((m) => m.role[0]).join(""), "su");
+  assert.doesNotMatch(upstreamCalls[2].body.messages[0].content, /REPEATED MESSAGE/);
+});
+
 test("caps output at 1000 tokens", async () => {
   mockUpstream(ok("ok"));
   await call(HI);

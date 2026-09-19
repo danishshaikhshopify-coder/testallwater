@@ -34,6 +34,13 @@ Caveats:
 - `nex-n2.5-pro` once answered with a raw JSON object (`{"water_type": ..., "message": ...}`) in about 50 replies read; `api/chat.js` unwraps such a reply to its `message` text.
 - `nemotron-3-super-free` was the fastest when it worked, but about a quarter of its requests came back empty.
 
+## Conversation behaviour
+
+- **Repeated messages.** If the customer sends the same message again after the AI already answered it (compared ignoring case, spacing and end punctuation; messages under 10 characters such as "yes" are exempt), the server adds a note to the system prompt telling the model to acknowledge it and move forward instead of repeating its earlier reply or question. The base prompt also tells the model to use the whole conversation.
+- **Failed then resent.** A message that got no answer (timeout or error) stays in the conversation as context. If the customer just sends it again, the unanswered copy is dropped so it is treated as a first-time message, not a repeat.
+- **Errors.** Customers see plain, friendly copy (timeout: "…please send your message again, our conversation is still here…"; busy; generic). Technical details go to the browser console and the Vercel logs only, and the failed exchange never enters the history, so the next message continues normally.
+- **Markdown.** Assistant replies render Markdown: `**bold**`, `*italic*`, `` `code` ``, fenced code blocks, bullet / numbered / nested lists, headings (shown as bold lines), horizontal rules and `http(s)` links (opened with `noopener noreferrer nofollow`). Tables and other syntax appear as plain text. The customer's own messages are always plain text. The renderer builds DOM nodes (`createElement`, `createTextNode`) from a fixed tag whitelist and never uses `innerHTML`, so model output cannot inject markup or scripts; `test/ui.test.js` checks this with a DOM that throws if `innerHTML` is touched.
+
 ## Reliability and debugging
 
 - The model is called with `reasoning_effort: "none"` and `max_tokens: 1000`. It is a reasoning model, but this is simple customer-support chat: at its default depth the free model took 22s to 50s+ per reply, and at `"low"` about one request in three still hit the deadline.

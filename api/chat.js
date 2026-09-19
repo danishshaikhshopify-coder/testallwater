@@ -46,6 +46,8 @@ CONVERSATION:
 - When enough information is known, recommend the water type, parameters to test,
   suitable test format, and briefly explain why.
 - Never guess when an important detail is missing.
+- Use the whole conversation. Never ask again for something the customer already told you.
+- If the customer repeats themselves, do not repeat your earlier reply; briefly acknowledge it and move forward.
 
 COMMON PARAMETERS:
 Free/total chlorine, bromine, pH, alkalinity, hardness, calcium hardness,
@@ -97,6 +99,45 @@ function sanitizeHistory(incoming) {
     )
     .map((m) => ({ role: m.role, content: m.content.slice(0, MAX_MESSAGE_CHARS) }))
     .slice(-MAX_HISTORY_MESSAGES);
+}
+
+// --- Repeated messages -------------------------------------------------------------
+// If the customer sends the same message again after the AI already answered it, the
+// model is told so, otherwise it tends to re-run the same list, reasoning and question.
+const MIN_REPEAT_CHARS = 10; // shorter replies ("yes", "chlorine") are legitimately reused
+
+const REPEATED_MESSAGE_NOTE = `IMPORTANT - REPEATED MESSAGE: The customer's latest message is word-for-word the same as one they already sent earlier in this conversation, and you already answered it. Do not repeat your earlier answer, list or question, and do not explain the same reasoning again. Start with a short, natural acknowledgement (for example that you already have this information), then move the conversation forward using everything already known: either ask ONE different, more specific question that you have not asked yet, or, if you already know enough, give your recommendation. If the message is a short reply that plausibly answers a newer question than before, just continue normally.`;
+
+// Compare ignoring case, spacing and surrounding punctuation.
+const normalizeForCompare = (text) =>
+  text.toLowerCase().replace(/\s+/g, " ").replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, "");
+
+// A message that was sent again straight away, with no AI reply in between, was never
+// answered (typically the first attempt failed or timed out). Keep only the last copy so
+// a plain "send it again" is treated as the first time, not as a repeat.
+function dropUnansweredRepeats(history) {
+  return history.filter(
+    (m, i) =>
+      !(
+        m.role === "user" &&
+        history[i + 1]?.role === "user" &&
+        normalizeForCompare(m.content) === normalizeForCompare(history[i + 1].content)
+      )
+  );
+}
+
+// True when the latest user message equals an earlier one that the AI already answered.
+function isAnsweredRepeat(history) {
+  const last = history[history.length - 1];
+  const key = normalizeForCompare(last.content);
+  if (key.length < MIN_REPEAT_CHARS) return false;
+  return history.some(
+    (m, i) =>
+      i < history.length - 1 &&
+      m.role === "user" &&
+      normalizeForCompare(m.content) === key &&
+      history.slice(i + 1, -1).some((later) => later.role === "assistant")
+  );
 }
 
 // An error that maps to a specific HTTP status and a message that is safe to show
@@ -312,15 +353,21 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: "No user message supplied." });
   }
 
-  const messages = [{ role: "system", content: SYSTEM_PROMPT }, ...history];
+  const conversation = dropUnansweredRepeats(history);
+  const repeated = isAnsweredRepeat(conversation);
+  // The note goes into the single system message (some models mishandle several).
+  const system = repeated ? `${SYSTEM_PROMPT}\n\n${REPEATED_MESSAGE_NOTE}` : SYSTEM_PROMPT;
+  const messages = [{ role: "system", content: system }, ...conversation];
   const requestId = req.headers?.["x-vercel-id"] || randomUUID();
   const meta = {
     requestId,
     model: MODEL,
     reasoningEffort: REASONING_EFFORT,
-    historyMessages: history.length,
+    historyMessages: conversation.length,
     startedAt: Date.now(),
   };
+  if (repeated) meta.repeatedMessage = true;
+  if (conversation.length !== history.length) meta.droppedUnansweredRepeats = history.length - conversation.length;
 
   try {
     const reply = await callModel({ baseUrl, apiKey, messages, meta });
