@@ -480,6 +480,11 @@ test("a JSON reply with a prose field shows just that text, whichever key the mo
     ['{"answer":"From the answer key","message":"From the message key"}', "From the message key"], // fixed key priority, not object order
     ['{"message":"  ","response":"used the non-blank one"}', "used the non-blank one"],
     ['{"question":"Is this a freshwater or saltwater aquarium?"}', "Is this a freshwater or saltwater aquarium?"],
+    // cut off inside nested content: the prose field is still recovered
+    ['{"answer":"Test ammonia and nitrite first.","details":{"steps":["measure","record', "Test ammonia and nitrite first."],
+    // JSON inside a code fence
+    ['```json\n{"message":"Shown without the fence"}\n```', "Shown without the fence"],
+    ["```\n{\"response\":\"Plain fence, still JSON\"}\n```", "Plain fence, still JSON"],
     // cut off before the closing brace (this exact reply leaked on the live site)
     ['{\n  "question": "Is this a freshwater or saltwater aquarium?"', "Is this a freshwater or saltwater aquarium?"],
     ['{"response": "Thanks, I\'ve got that. Is it freshwater?"', "Thanks, I've got that. Is it freshwater?"],
@@ -525,10 +530,20 @@ test("a structured JSON reply (no prose field) is shown as a readable list, not 
 });
 
 test("a cut-off structured JSON reply is repaired and shown as a list", async () => {
-  mockUpstream(ok('{"water_type":"aquarium","parameters":["ammonia","nitrite"'));
-  const res = await call(HI);
-  assert.equal(res.statusCode, 200);
-  assert.equal(res.payload.reply, "- **Water type:** aquarium\n- **Parameters:** ammonia, nitrite");
+  const cases = [
+    ['{"water_type":"aquarium","parameters":["ammonia","nitrite"', "- **Water type:** aquarium\n- **Parameters:** ammonia, nitrite"],
+    ['{"water_type":"aquarium","parameters":["ammonia","nit', "- **Water type:** aquarium\n- **Parameters:** ammonia"], // partial last item dropped
+    ['{"water_type":"aquarium","test_for', "- **Water type:** aquarium"], // dangling key
+    ['{"water_type":"aquarium",', "- **Water type:** aquarium"], // trailing comma
+    ['{"water_type":"aquarium","test_for":', "- **Water type:** aquarium"], // key with no value
+    ['{\n  "ammonia": "urgent",\n  "ammonia_method": "liquid test kit"\n', "- **Ammonia:** urgent\n- **Ammonia method:** liquid test kit"],
+  ];
+  for (const [raw, expected] of cases) {
+    mockUpstream(ok(raw));
+    const res = await call(HI);
+    assert.equal(res.statusCode, 200, raw);
+    assert.equal(res.payload.reply, expected, raw);
+  }
 });
 
 test("JSON that cannot be rendered is an error, never shown to the customer", async () => {
@@ -537,8 +552,13 @@ test("JSON that cannot be rendered is an error, never shown to the customer", as
     '{"message":"   "}', // blank
     "{}",
     '{"a":{"b":1}}',
-    '{"a": {"b": ', // cut off and unrepairable
+    '{"a": {"b": ', // cut off and nothing usable left
     '{"message":"   "', // cut off and blank
+    // the exact shape that leaked on the live site: multi-line, cut off inside nested content
+    '{\n  "ammonia": "urgent",\n  "ammonia_method": "liquid test kit",\n  "tests": [{"name": "nitrite", "why": "toxic to fish',
+    // an object followed by prose is still never shown as raw JSON
+    '{"message":"x"} and then more prose',
+    '```json\n{"a":{"b":{"c":1}}}\n```',
   ]) {
     logs.out.length = 0;
     logs.err.length = 0;
@@ -551,9 +571,58 @@ test("JSON that cannot be rendered is an error, never shown to the customer", as
   }
 });
 
+// The invariant behind all the JSON handling, tested without guessing shapes: cut realistic
+// JSON replies at EVERY possible length; the customer must never be shown raw JSON.
+test("no truncation point of a JSON reply ever shows raw JSON to the customer", async () => {
+  const sources = [
+    { message: "Is this a freshwater or saltwater aquarium?" },
+    { water_type: "aquarium", parameters: ["ammonia", "nitrite", "nitrate"], test_format: "liquid drop kit", urgent: true, count: 3 },
+    { answer: "Test ammonia first.", details: { steps: ["measure", "record"], why: { a: "toxic", b: "fatal" } } },
+    { response: "Thanks, I\u2019ve got that. Is it \"freshwater\"?\nAnd how big is the tank (60 L)?" },
+    { ammonia: "urgent", ammonia_method: "liquid kit", tests: [{ name: "nitrite", why: "toxic to fish" }, { name: "pH", why: "stress" }] },
+    { question: "How long has it been like this?", options: ["today", "this week"], note: "Path C:\\tank" },
+  ];
+  const jsonLooking = /^\s*[{[`]|"[A-Za-z_]+"\s*:/;
+  let checked = 0;
+  let shownAsText = 0;
+  let errors = 0;
+  for (const source of sources) {
+    for (const full of [JSON.stringify(source), JSON.stringify(source, null, 2)]) {
+      for (let n = 1; n <= full.length; n++) {
+        const cut = full.slice(0, n);
+        logs.out.length = 0;
+        logs.err.length = 0;
+        mockUpstream(ok(cut));
+        const res = await call(HI);
+        checked++;
+        if (res.statusCode === 200) {
+          shownAsText++;
+          assert.doesNotMatch(res.payload.reply, jsonLooking, `raw JSON shown for a cut at ${n}: ${JSON.stringify(cut)}`);
+        } else {
+          errors++;
+          assert.equal(res.statusCode, 502, JSON.stringify(cut));
+          assert.match(res.payload.code, /^(empty_reply|bad_response)$/, JSON.stringify(cut));
+          assert.equal(res.payload.reply, undefined);
+        }
+      }
+    }
+  }
+  assert.ok(checked > 1000, `only ${checked} cut points checked`);
+  assert.ok(shownAsText > 0 && errors > 0, "expected a mix of recovered text and clean errors");
+});
+
 // Seen live: a reply that was just "{" and two replies that were just "For".
 test("a truncated one-token reply is an error, not a broken chat bubble", async () => {
-  for (const raw of ["{", "For", "  {  ", "...", "ok", "[", '""']) {
+  // "{" alone is a cut-off JSON object, so it is reported as an unreadable response
+  for (const raw of ["{", "  {  ", '{"']) {
+    mockUpstream(ok(raw));
+    const res = await call(HI);
+    assert.equal(res.statusCode, 502, JSON.stringify(raw));
+    assert.equal(res.payload.code, "bad_response");
+    assert.equal(res.payload.reply, undefined);
+  }
+
+  for (const raw of ["For", "...", "ok", "[", '""']) {
     logs.out.length = 0;
     logs.err.length = 0;
     mockUpstream(ok(raw));
@@ -581,10 +650,10 @@ test("replies that are not a JSON object are left exactly as written", async () 
     "{not json}",
     "Use {braces} carefully",
     'Prefix {"message":"x"}',
-    '{"message":"x"} and then more prose',
     "[1, 2, 3, 4, 5]",
     '["ammonia","nitrite"]',
-    "```json\n{\"message\":\"in a code block\"}\n```",
+    "```\nlet a = 1;\n```", // a code block that is not JSON
+    "Use this format:\n```json\n{\"message\": \"example\"}\n```", // prose first: not a JSON reply
   ];
   for (const text of untouched) {
     logs.out.length = 0;

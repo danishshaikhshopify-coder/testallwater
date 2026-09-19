@@ -186,12 +186,14 @@ function upstreamMessage(data) {
 //   1. an object with a prose field   -> show just that text
 //   2. a flat object of plain values  -> show it as a readable bullet list
 //   3. anything else that is JSON     -> not renderable (caller reports an error)
-// It can also be cut off before the closing brace (seen live: {"question": "..." with no
-// "}"), so an unterminated object is repaired by appending the missing closers.
-// Replies that are not a JSON object are returned untouched.
+// The invariant: a reply that starts like a JSON object ({ "key": ... }, optionally in a
+// ```json fence) is NEVER shown raw. It is often cut off part-way (live examples: no closing
+// brace, or truncated inside nested content), so it is repaired by closing whatever is open.
+// Replies that do not start like a JSON object are returned untouched.
 const PROSE_KEYS = ["message", "response", "reply", "answer", "question", "assistantmessage", "assistantresponse", "text", "content"];
-const JSON_OBJECT_START = /^\{\s*("[^"\n]{1,60}"\s*:|\})/;
-const CLOSERS = ["}", '"}', "]}", '"]}'];
+// "{" followed by a quote, a closing brace, or nothing (a reply cut off right after the "{")
+const JSON_OBJECT_START = /^\{\s*("|\}|$)/;
+const JSON_FENCE = /^```(?:json)?[ \t]*\n([\s\S]*?)\n?(?:```[ \t]*)?$/i; // closing fence optional (cut off)
 const keyId = (key) => key.toLowerCase().replace(/[^a-z]/g, "");
 const isPlain = (v) => ["string", "number", "boolean"].includes(typeof v);
 const humanizeKey = (key) => {
@@ -199,31 +201,52 @@ const humanizeKey = (key) => {
   return words.charAt(0).toUpperCase() + words.slice(1);
 };
 
-// The parsed object; undefined when the text should be left alone (it has a "}" but is not
-// valid JSON, e.g. JSON followed by prose); null when it looks like JSON but is unusable.
-function parseJsonObject(reply) {
-  try {
-    return JSON.parse(reply);
-  } catch {
-    // fall through
+// Close whatever a cut-off JSON text left open: an unfinished string, a dangling key or
+// trailing comma, and every open { and [ (innermost first).
+function repairJson(text) {
+  const open = [];
+  let inString = false;
+  let escaped = false;
+  for (const ch of text) {
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === '"') inString = false;
+    } else if (ch === '"') inString = true;
+    else if (ch === "{" || ch === "[") open.push(ch);
+    else if (ch === "}" || ch === "]") open.pop();
   }
-  if (reply.includes("}")) return undefined;
-  for (const closer of CLOSERS) {
+  let out = inString ? `${text}"` : text;
+  if (open[open.length - 1] === "[") {
+    // inside an array: drop an element that was cut off mid-string, keep finished ones
+    if (inString) out = out.replace(/([,[]\s*)"(?:[^"\\]|\\.)*"$/, "$1");
+  } else {
+    // inside an object: a key with no value (a string after "," or "{" is always a key)
+    out = out.replace(/([,{]\s*)"[^"\\]*"\s*:?\s*$/, "$1");
+  }
+  out = out.replace(/,\s*$/, ""); // trailing comma
+  return out + open.reverse().map((c) => (c === "{" ? "}" : "]")).join("");
+}
+
+// The parsed object, or null when it looks like JSON but cannot be made sense of.
+function parseJsonObject(text) {
+  for (const candidate of [text, repairJson(text)]) {
     try {
-      return JSON.parse(reply + closer);
+      const value = JSON.parse(candidate);
+      if (value && typeof value === "object" && !Array.isArray(value)) return value;
     } catch {
-      // try the next closer
+      // try the repaired text
     }
   }
   return null;
 }
 
 function unwrapJsonReply(reply) {
-  if (!JSON_OBJECT_START.test(reply)) return { text: reply };
-  const obj = parseJsonObject(reply);
-  if (obj === undefined) return { text: reply };
+  const fenced = JSON_FENCE.exec(reply);
+  const candidate = fenced ? fenced[1].trim() : reply;
+  if (!JSON_OBJECT_START.test(candidate)) return { text: reply };
+  const obj = parseJsonObject(candidate);
   if (obj === null) return { text: null, unwrapped: "unrenderable" };
-  if (typeof obj !== "object" || Array.isArray(obj)) return { text: reply };
 
   const keys = new Map(Object.keys(obj).map((k) => [keyId(k), k]));
   for (const id of PROSE_KEYS) {
