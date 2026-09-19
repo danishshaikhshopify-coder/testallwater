@@ -1,4 +1,7 @@
 import { randomUUID } from "node:crypto";
+import { analyzeNeeds, parameterLabels } from "./_needs.js";
+import { findProducts } from "./_catalog.js";
+import { guardReply } from "./_guard.js";
 
 const DEFAULT_BASE_URL = "https://router.bynara.id/v1";
 // Zero-cost model on NaraRouter's Free plan (GET https://router.bynara.id/api/plans).
@@ -65,10 +68,16 @@ to the setup.
 Never diagnose human illness.
 
 PRODUCT RULE:
-This is a prototype and is NOT connected to the live TestAllWater catalog.
-Never invent product names, prices, stock, SKUs, ratings or URLs.
-For now, recommend test categories/specifications only. Later, use retrieved
-Shopify catalog data to recommend real products.
+You can only know about TestAllWater products through a "PRODUCT CONTEXT" note that may be
+added to these instructions. Never invent, guess or recall product names, brands, model
+numbers, prices, stock, SKUs, ratings, images or links, and never name a specific product
+yourself. When the note says products were found, the app shows them as product cards under
+your reply: do not repeat their names or prices, refer to them as "the options below", and say
+in plain words which parameters they cover. When the note says no product was found, say
+clearly that no matching product was found in the TestAllWater catalog and continue helping
+with advice. Without a note, recommend test types and parameters only.
+If the customer gives test results, say briefly whether each value looks low, normal or high
+for that kind of water, and which further test is worth doing.
 
 STYLE:
 Be concise, friendly, knowledgeable and practical. Avoid long lectures.
@@ -418,6 +427,57 @@ async function callModel({ baseUrl, apiKey, messages, meta }) {
   throw lastError;
 }
 
+// --- Real product context -------------------------------------------------------------------
+// The model never sees product names, prices or links (it could repeat or mangle them). It is
+// told only how many real products are being shown and which parameters they are listed for.
+
+const NO_MATCH_TOPIC_MAX = 3;
+
+function noMatchTopic(needs) {
+  const explicit = parameterLabels(needs.explicit);
+  if (explicit.length) return explicit.slice(0, NO_MATCH_TOPIC_MAX).join(", ");
+  return needs.label || parameterLabels(needs.parameters).slice(0, NO_MATCH_TOPIC_MAX).join(", ") || "this";
+}
+
+function productContext(needs, catalog) {
+  const topics = parameterLabels(needs.parameters).join(", ");
+  if (catalog.status === "ok") {
+    const n = catalog.products.length;
+    const covers = [...new Set(catalog.products.flatMap((p) => p.covers))].join(", ");
+    return `PRODUCT CONTEXT: The app is showing ${n} real TestAllWater product${n === 1 ? "" : "s"} as product cards under your reply, listed for: ${covers}. Tests relevant to this conversation: ${topics}. Say the options are shown below and explain in plain words which of these tests matter and why. Do not name, price or link any product yourself.`;
+  }
+  if (catalog.status === "no_match") {
+    return `PRODUCT CONTEXT: The TestAllWater catalog has NO product matching: ${noMatchTopic(needs)}. Say clearly that no matching product was found in the TestAllWater catalog. Do not name, suggest or invent any product, price or link. You can still explain which tests are relevant.`;
+  }
+  if (catalog.status === "unavailable") {
+    return `PRODUCT CONTEXT: The product catalog could not be checked right now. Do not name or suggest any specific product; tell the customer you can't show product options at the moment, and carry on explaining which tests are relevant (${topics}).`;
+  }
+  return "";
+}
+
+const SAYS_NO_MATCH = /\bno (?:matching |suitable |relevant )?(?:product|kit|test)s?\b.{0,40}\b(?:found|available|listed)\b|couldn.?t find (?:a |any )?(?:matching |suitable )?(?:product|kit)|(?:don.?t|do not|doesn.?t|does not) (?:currently )?(?:have|list|stock|sell|carry)/i;
+const SAYS_UNAVAILABLE = /couldn.?t (?:check|load|reach|access)|can.?t show (?:product|any)|unable to (?:check|show|load)|catalog(?:ue)? (?:is )?(?:un|temporar)/i;
+
+// Cleans the model's text and makes sure the customer is always told plainly when there is no
+// product, or when the catalog could not be checked, even if the model forgot to say so.
+function finalizeReply(reply, needs, catalog, meta) {
+  const guarded = guardReply(reply, catalog.products);
+  if (guarded.removed) meta.guardRemoved = guarded.removed;
+  let text = guarded.text;
+  if (!text) {
+    text = catalog.products.length
+      ? "Here are the options from the TestAllWater catalog that match what you told me."
+      : "Could you tell me a little more about your water so I can suggest the right test?";
+  }
+  if (catalog.status === "no_match" && !SAYS_NO_MATCH.test(text)) {
+    text += `\n\n**No matching product found:** the TestAllWater catalog doesn't currently list a product for ${noMatchTopic(needs)}.`;
+  }
+  if (catalog.status === "unavailable" && !SAYS_UNAVAILABLE.test(text)) {
+    text += "\n\n**Product options unavailable:** I couldn't check the TestAllWater catalog just now, so I can't show products at the moment. Please try again shortly.";
+  }
+  return text;
+}
+
 export default async function handler(req, res) {
   res.setHeader("Cache-Control", "no-store");
 
@@ -442,8 +502,16 @@ export default async function handler(req, res) {
 
   const conversation = dropUnansweredRepeats(history);
   const repeated = isAnsweredRepeat(conversation);
-  // The note goes into the single system message (some models mishandle several).
-  const system = repeated ? `${SYSTEM_PROMPT}\n\n${REPEATED_MESSAGE_NOTE}` : SYSTEM_PROMPT;
+
+  // What is the customer trying to test, and which REAL catalog products fit? Skipped for a repeated
+  // message: the cards were already shown with the first answer.
+  const needs = analyzeNeeds(conversation.filter((m) => m.role === "user").map((m) => m.content));
+  const catalog = repeated ? { status: "skipped", products: [], meta: {} } : await findProducts(needs);
+
+  // The notes go into the single system message (some models mishandle several).
+  const system = [SYSTEM_PROMPT, repeated ? REPEATED_MESSAGE_NOTE : "", productContext(needs, catalog)]
+    .filter(Boolean)
+    .join("\n\n");
   const messages = [{ role: "system", content: system }, ...conversation];
   const requestId = req.headers?.["x-vercel-id"] || randomUUID();
   const meta = {
@@ -455,13 +523,20 @@ export default async function handler(req, res) {
   };
   if (repeated) meta.repeatedMessage = true;
   if (conversation.length !== history.length) meta.droppedUnansweredRepeats = history.length - conversation.length;
+  if (catalog.status !== "skipped") {
+    meta.catalog = { status: catalog.status, shown: catalog.products.length, ...catalog.meta };
+    meta.needs = { context: needs.context, parameters: needs.parameters };
+  }
 
   try {
-    const reply = await callModel({ baseUrl, apiKey, messages, meta });
+    const raw = await callModel({ baseUrl, apiKey, messages, meta });
+    const reply = finalizeReply(raw, needs, catalog, meta);
     meta.outcome = "ok";
     meta.replyChars = reply.length;
     logRequest(meta);
-    return res.status(200).json({ reply, model: MODEL });
+    const body = { reply, model: MODEL };
+    if (catalog.products.length) body.products = catalog.products;
+    return res.status(200).json(body);
   } catch (error) {
     meta.outcome = error.code;
     logRequest(meta);

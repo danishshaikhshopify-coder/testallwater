@@ -6,12 +6,16 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import handler from "../api/chat.js";
+import { resetCatalogState } from "../api/_catalog.js";
 import { createFakeDocument, FakeEl, toHtml, textOf, allElements } from "./fake-dom.js";
+import { createFakeStore, installWorld, llmReply, liveByHandle } from "./fake-store.js";
 
 const html = readFileSync(new URL("../index.html", import.meta.url), "utf8");
 const script = /<script>([\s\S]*?)<\/script>/.exec(html)[1];
 const renderCode = /\/\*<render>\*\/([\s\S]*?)\/\*<\/render>\*\//.exec(script)[1];
-const { renderMarkdown, friendlyError } = new Function(`${renderCode}\nreturn { renderMarkdown, friendlyError };`)();
+const { renderMarkdown, friendlyError, renderProductCards } = new Function(
+  `${renderCode}\nreturn { renderMarkdown, friendlyError, renderProductCards };`
+)();
 
 const realFetch = globalThis.fetch;
 const flush = () => new Promise((resolve) => setImmediate(resolve));
@@ -19,6 +23,7 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
 beforeEach(() => {
   process.env.NARA_ROUTER_API_KEY = "test-key";
   process.env.NARA_ROUTER_BASE_URL = "https://router.example/v1";
+  process.env.SHOPIFY_CATALOG = "off";
   mock.method(console, "log", () => {});
   mock.method(console, "error", () => {});
 });
@@ -201,6 +206,7 @@ function bootPage(fetchImpl) {
     document: doc,
     fetch: fetchImpl,
     AbortController,
+    URL, // the product-card link checks use it
     // resolved at call time so mock timers apply
     setTimeout: (...args) => globalThis.setTimeout(...args),
     clearTimeout: (...args) => globalThis.clearTimeout(...args),
@@ -273,6 +279,229 @@ function scriptUpstream(...steps) {
   };
   return { calls };
 }
+
+// ---------------------------------------------------------------------------------------------
+// Product cards
+// ---------------------------------------------------------------------------------------------
+
+const STORE = "https://testallwater.co.uk";
+const product = (over = {}) => ({
+  id: "8030002643202",
+  title: "Palintest Chlorine/pH Pooltester",
+  vendor: "Palintest",
+  url: `${STORE}/products/palintest-chlorine-ph-pooltester`,
+  image: "https://cdn.shopify.com/s/files/1/0574/5511/6439/files/2_b7afde52.jpg?v=1746103500&width=360",
+  price: { amount: "18.19", currency: "GBP", display: "£18.19", from: false },
+  available: true,
+  addToCartUrl: `${STORE}/cart/add?id=43714841051394&quantity=1&return_to=%2Fcart`,
+  reason: "Listed for chlorine and pH testing — relevant to cloudy pool water.",
+  covers: ["free and total chlorine", "pH"],
+  ...over,
+});
+
+function cards(list) {
+  const root = new FakeEl("div");
+  const shown = renderProductCards(list, createFakeDocument(), root);
+  return { root, shown, html: root.children.map(toHtml).join("") };
+}
+
+test("cards: a product renders image, title, price, stock, reason and both buttons, all as real links", () => {
+  const { root, shown } = cards([product()]);
+  assert.equal(shown.length, 1);
+  const el = allElements(root);
+  const byClass = (c) => el.filter((e) => e.classes.has(c));
+
+  assert.equal(root.children[0].tag, "article");
+  assert.equal(textOf(byClass("tw-ptitle")[0]), "Palintest Chlorine/pH Pooltester");
+  assert.equal(byClass("tw-ptitle")[0].getAttribute("href"), `${STORE}/products/palintest-chlorine-ph-pooltester`);
+  assert.equal(textOf(byClass("tw-pprice")[0]), "£18.19");
+  assert.equal(textOf(byClass("tw-pstock")[0]), "In stock");
+  assert.equal(textOf(byClass("tw-pvendor")[0]), "Palintest");
+  assert.match(textOf(byClass("tw-preason")[0]), /^Listed for chlorine and pH testing/);
+
+  const img = el.find((e) => e.tag === "img");
+  assert.match(img.getAttribute("src"), /^https:\/\/cdn\.shopify\.com\//);
+  assert.equal(img.getAttribute("alt"), "Palintest Chlorine/pH Pooltester");
+  assert.equal(img.getAttribute("loading"), "lazy");
+
+  const [view, cart] = byClass("tw-pbtn");
+  assert.equal(textOf(view), "View Product");
+  assert.equal(view.getAttribute("href"), `${STORE}/products/palintest-chlorine-ph-pooltester`);
+  assert.equal(textOf(cart), "Add to Cart");
+  assert.equal(cart.getAttribute("href"), `${STORE}/cart/add?id=43714841051394&quantity=1&return_to=%2Fcart`);
+  for (const link of el.filter((e) => e.tag === "a")) {
+    assert.equal(link.getAttribute("target"), "_blank");
+    assert.equal(link.getAttribute("rel"), "noopener noreferrer");
+  }
+});
+
+test("cards: no Add to Cart when the product has options to choose; 'From' price when it varies; no image is honest", () => {
+  const html = cards([product({ addToCartUrl: null, price: { amount: "7.84", currency: "GBP", display: "£7.84", from: true }, image: null })]).html;
+  assert.doesNotMatch(html, /Add to Cart/);
+  assert.match(html, /From £7\.84/);
+  assert.match(html, /No image/);
+  assert.doesNotMatch(html, /<img/);
+});
+
+test("cards: anything that is not verifiably the store's own product is skipped", () => {
+  const bad = [
+    product({ url: "https://evil.example/products/x" }),
+    product({ url: "http://testallwater.co.uk/products/x" }), // not https
+    product({ url: `${STORE}/pages/about` }), // not a product page
+    product({ url: "javascript:alert(1)" }),
+    product({ url: "https://testallwater.co.uk.evil.example/products/x" }),
+    product({ price: { display: "$12.99", from: false } }), // wrong currency
+    product({ price: { display: "PKR 6,900.00", from: false } }),
+    product({ price: { display: "£12.9", from: false } }),
+    product({ price: { display: "£12.99 <b>", from: false } }),
+    product({ price: null }),
+    product({ title: "   " }),
+    product({ available: false }),
+    null,
+    "not an object",
+  ];
+  const { shown, html } = cards(bad);
+  assert.equal(shown.length, 0);
+  assert.equal(html, "");
+});
+
+test("cards: a bad image or cart link only removes that part, never shows a foreign address", () => {
+  const html = cards([
+    product({ image: "https://evil.example/a.jpg", addToCartUrl: "https://evil.example/cart/add?id=1" }),
+    product({ url: `${STORE}/products/second`, image: "http://cdn.shopify.com/a.jpg", addToCartUrl: `${STORE}/cart/add?id=abc&quantity=1` }),
+    product({ url: `${STORE}/products/third`, image: "javascript:alert(1)", addToCartUrl: `${STORE}/checkout?id=1` }),
+  ]).html;
+  assert.equal((html.match(/<article/g) ?? []).length, 3);
+  assert.doesNotMatch(html, /evil\.example|javascript:|http:\/\//);
+  assert.doesNotMatch(html, /Add to Cart/);
+  assert.equal((html.match(/No image/g) ?? []).length, 3);
+});
+
+test("cards: text from the catalog is only ever text (no markup, no innerHTML)", () => {
+  const { root, html: out } = cards([
+    product({
+      title: '<img src=x onerror=alert(1)> Strips <script>alert(2)</script>',
+      vendor: '<b onclick="x">Evil</b>',
+      reason: '<a href="javascript:alert(3)">click</a>',
+    }),
+  ]); // FakeEl throws if innerHTML is ever used
+
+  // Only the elements and attributes the renderer itself creates exist...
+  const tags = new Set(allElements(root).map((e) => e.tag));
+  assert.deepEqual([...tags].sort(), ["a", "article", "div", "img", "p", "span"]);
+  const attrs = new Set(allElements(root).flatMap((e) => Object.keys(e.attrs)));
+  for (const name of attrs) assert.ok(["role", "aria-label", "href", "target", "rel", "src", "alt", "loading", "width", "height"].includes(name), name);
+  for (const a of allElements(root).filter((e) => e.tag === "a")) assert.match(a.getAttribute("href"), /^https:\/\/testallwater\.co\.uk\//);
+
+  // ...and the hostile text is displayed as text: no raw angle bracket survives outside our own tags.
+  const withoutOurTags = out.replace(/<\/?(article|a|img|div|span|p)( [^<>]*)?>/g, "");
+  assert.doesNotMatch(withoutOurTags, /[<>]/);
+  assert.match(out, /&lt;img src=x onerror=alert\(1\)&gt; Strips &lt;script&gt;alert\(2\)&lt;\/script&gt;/);
+});
+
+test("cards: at most three are shown", () => {
+  const many = Array.from({ length: 6 }, (_, i) => product({ url: `${STORE}/products/p${i}`, title: `Product ${i}` }));
+  assert.equal(cards(many).shown.length, 3);
+});
+
+// End to end: the real page script, the real handler, and the fake storefront built from real data.
+
+const poolMessage = "My pool water is cloudy";
+
+async function shopPage(reply = "A few tests will tell us what is going on. See the options below.", storeOptions = {}) {
+  delete process.env.SHOPIFY_CATALOG;
+  resetCatalogState();
+  const store = createFakeStore(storeOptions);
+  installWorld({ store, llm: llmReply(reply) });
+  return { page: bootPage(apiFetch), store };
+}
+
+test("page: a pool question shows the answer bubble and then a separate row of real product cards", async () => {
+  const { page } = await shopPage();
+  await page.send(poolMessage);
+
+  const rows = page.el("messages").children;
+  assert.deepEqual(rows.map((r) => r.className), ["tw-row user", "tw-row assistant", "tw-row assistant tw-products"]);
+
+  // the answer bubble is exactly what it always was: text only, no product markup inside it
+  const bubble = rows[1].children[rows[1].children.length - 1];
+  assert.equal(textOf(bubble), "A few tests will tell us what is going on. See the options below.");
+  assert.equal(allElements(bubble).some((e) => e.tag === "article" || e.classes.has("tw-pcard")), false);
+
+  const list = allElements(rows[2]).filter((e) => e.classes.has("tw-pcard"));
+  assert.ok(list.length >= 1 && list.length <= 3, `${list.length} cards`);
+  for (const card of list) {
+    const title = textOf(allElements(card).find((e) => e.classes.has("tw-ptitle")));
+    const href = allElements(card).find((e) => e.classes.has("tw-ptitle")).getAttribute("href");
+    const real = liveByHandle[href.split("/products/")[1]];
+    assert.ok(real, `${title} is not a real product`);
+    assert.equal(title, real.title);
+    assert.equal(textOf(allElements(card).find((e) => e.classes.has("tw-pprice"))).replace("From ", ""), `£${(real.price_min / 100).toFixed(2)}`.replace(/\B(?=(\d{3})+(?!\d))/g, ","));
+    assert.match(href, /^https:\/\/testallwater\.co\.uk\/products\//);
+  }
+  assert.ok(page.isIdle());
+});
+
+test("page: products already shown in this chat are not shown again for the next question", async () => {
+  const { page } = await shopPage();
+  await page.send(poolMessage);
+  const before = page.el("messages").children.filter((r) => r.classes.has("tw-products")).length;
+  assert.equal(before, 1);
+
+  await page.send("What test should I buy for my pool?"); // same need, same products
+  const after = page.el("messages").children.filter((r) => r.classes.has("tw-products")).length;
+  assert.equal(after, 1, "the same three cards must not be repeated");
+});
+
+test("page: no matching product shows a clear line in the answer and no card", async () => {
+  const { page } = await shopPage("PFAS need a specialist laboratory test.");
+  await page.send("Do you sell a kit to test my tap water for PFAS?");
+  const rows = page.el("messages").children;
+  assert.equal(rows.filter((r) => r.classes.has("tw-products")).length, 0);
+  const bubble = rows[1].children[rows[1].children.length - 1];
+  assert.match(textOf(bubble), /No matching product found: the TestAllWater catalog doesn't currently list a product for PFAS\./);
+  assert.match(toHtml(bubble), /<strong>No matching product found:<\/strong>/);
+});
+
+test("page: when the catalog is down the chat still answers and says so, with no cards", async () => {
+  const { page } = await shopPage("Let's work out what to test.", { failSearch: true });
+  await page.send(poolMessage);
+  const rows = page.el("messages").children;
+  assert.equal(rows.filter((r) => r.classes.has("tw-products")).length, 0);
+  assert.match(textOf(rows[1].children[rows[1].children.length - 1]), /Product options unavailable/);
+  assert.ok(page.isIdle());
+});
+
+test("page: a bad product from the server is dropped by the page itself, the good ones still show", async () => {
+  const good = product();
+  const evil = product({ url: "https://evil.example/products/x", title: "Evil" });
+  const page = bootPage(async () =>
+    new Response(JSON.stringify({ reply: "Here you go.", model: "m", products: [evil, good] }), { status: 200 })
+  );
+  await page.send("pool test please, my pool is cloudy");
+  const cardsShown = allElements(page.el("messages")).filter((e) => e.classes.has("tw-pcard"));
+  assert.equal(cardsShown.length, 1);
+  assert.doesNotMatch(toHtml(page.el("messages").children.at(-1)), /Evil|evil\.example/);
+});
+
+test("page: the customer's own text and the answer bubble are unchanged by the product feature", async () => {
+  const { page } = await shopPage("**Test** these:\n\n- Free chlorine\n- pH");
+  await page.send(poolMessage);
+  const [user, assistant] = page.rows();
+  assert.equal(textOf(user.bubble), poolMessage);
+  assert.equal(
+    assistant.bubble.children.map(toHtml).join(""),
+    "<p><strong>Test</strong> these:</p><ul><li>Free chlorine</li><li>pH</li></ul>"
+  );
+});
+
+test("page: a product card row is a separate element, so it cannot break the bubble layout", () => {
+  const css = html.slice(html.indexOf("<style>"), html.indexOf("</style>"));
+  assert.match(css, /\.tw-row\.tw-products\{[^}]*padding-left:41px/); // avatar (31) + gap (10): aligns under the bubble
+  assert.match(css, /@media\(max-width:760px\)\{[\s\S]*\.tw-row\.tw-products\{padding-left:0\}/);
+  // the original bubble rule is untouched
+  assert.match(css, /\.tw-bubble\{max-width:min\(720px,78%\);font-size:14px;line-height:1\.68;padding:14px 16px;border-radius:17px;background:#fff;border:1px solid #e3e9ed;box-shadow:0 5px 18px rgba\(25,48,65,\.045\);white-space:pre-wrap\}/);
+});
 
 test("page: assistant replies render Markdown; the user's own text stays plain", async () => {
   scriptUpstream(ok("**Test next:**\n\n- Free chlorine\n- pH"));
@@ -357,6 +586,7 @@ test("timeout recovery: after both retries fail the user sees a clean message, a
   const page = bootPage(apiFetch);
 
   page.submit("My pool water is cloudy and I use chlorine");
+  await flush();
   mock.timers.tick(9000); // attempt 1 times out
   await flush();
   mock.timers.tick(9000); // attempt 2 times out
@@ -393,6 +623,7 @@ test("timeout recovery: resending the SAME message after a failure is answered n
   const message = "My pool water is cloudy and I use chlorine";
 
   page.submit(message);
+  await flush();
   mock.timers.tick(9000);
   await flush();
   mock.timers.tick(9000);

@@ -17,6 +17,29 @@ Browser (index.html)  ──POST /api/chat──▶  Vercel function (api/chat.j
 - The system prompt is server-side. Any `system` message sent by a client is discarded, so the endpoint cannot be repurposed as a general-purpose LLM proxy. History length (12 turns) and message size (4,000 chars) are capped.
 - The endpoint has no rate limiting. If abuse becomes a concern, add one (e.g. Vercel WAF rate-limit rule or Upstash Ratelimit).
 
+## Shopify product recommendations
+
+The assistant recommends **real products from the live TestAllWater store** (`https://testallwater.co.uk`, Shopify `test-all-water.myshopify.com`) and shows them as product cards under its answer: image, title, price, a "why it matches" line, **View Product**, and **Add to Cart** when there is nothing to choose.
+
+**How the catalog is accessed.** Through the store's *public, read-only storefront endpoints* (`/search/suggest.json`, `/products/<handle>.js`, `/cart.js`). No Shopify API key, token or secret exists anywhere in this project, and what we read is exactly what a customer sees. The catalog has ~4,200 products, so nothing is bulk-downloaded: each conversation runs a few live searches (about 1 s) and re-reads only the three winners.
+
+**Flow** (`api/_needs.js` -> `api/_catalog.js` -> `api/chat.js`):
+1. `_needs.js` turns what the customer said into a kind of water (pool, hot tub, aquarium, pond, well, drinking) and the parameters worth testing (from what they named, their symptoms, and the usual checklist for that water). Deterministic keyword rules, independent of the language model.
+2. `_catalog.js` searches the store, then keeps only listings that are in stock, are real tests (not chemicals, refills or accessories), are not expired/clearance/opened stock, are not built for a different kind of water, and whose **title** names a needed parameter or the right kind of water (a generic tag is not enough). It picks up to three so that together they cover different parameters, simple kits and strips before lab instruments, and no more than two per brand. Nothing is labelled "best" or ranked in a way the customer can see.
+3. The winners are re-read from `/products/<handle>.js` for the current price and stock; anything sold out is dropped.
+4. The model is told only *how many* products are shown and which parameters they are listed for, never their names, prices or links. `api/_guard.js` then removes any price, link or unlisted branded product the model writes anyway.
+5. If nothing matches, the customer is told "No matching product found" (added automatically if the model forgets); if the store cannot be reached, the reply says so. Nothing is ever invented.
+
+**Everything on a card is real.** Title, price, stock, image, URL and variant id come from Shopify. The only sentence we write is "Listed for X, Y and Z testing", built from parameters found in that product's own title/tags. The page re-validates every card before showing it (https on `testallwater.co.uk`, images from Shopify's CDN, price must look like a GBP amount) and builds cards with DOM nodes only (no `innerHTML`).
+
+**Currency.** The store uses Shopify Markets and prices depend on the visitor's country (the same product is GBP 18.19 or PKR 6,900). Every request pins the UK market (`localization=GB`) and `/cart.js` is checked to report `GBP` before any price is used; if not, no products are shown (fails closed).
+
+**Add to Cart** is a link `https://testallwater.co.uk/cart/add?id=<variant>&quantity=1&return_to=/cart` and only appears for products with a single in-stock variant. The customer completes checkout on the store; nothing is purchased by the assistant.
+
+Settings (both optional, Vercel environment variables): `SHOPIFY_CATALOG=off` switches product recommendations off instantly; `SHOPIFY_STORE_ORIGIN` points at a different storefront.
+
+Known limits: search relevance depends on the store's own titles and tags; products with several variants have no Add to Cart (the customer chooses on the product page); prices are GBP for everyone, and the product page shows the visitor's own currency.
+
 ## Model selection
 
 The Free-plan chat models were compared on the live deployment through the exact production flow (server prompt, `reasoning_effort: "none"`, 1000 tokens, 2 x 9s attempts). Requests were interleaved model-by-model with identical prompts (six realistic customer messages, one of them multi-turn) so every model saw the same upstream conditions. 48 requests per model over two runs:
@@ -78,6 +101,10 @@ npx vercel dev                            # serves index.html and /api/chat loca
 | --- | --- |
 | `index.html` | Chat UI (static) |
 | `api/chat.js` | `/api/chat` serverless function |
+| `api/_needs.js` | Customer messages -> kind of water and parameters to test |
+| `api/_catalog.js` | Live Shopify catalog search, relevance rules, card data |
+| `api/_guard.js` | Removes invented prices, links and branded products from replies |
+| `test/shop.test.js`, `test/fake-store.js`, `test/fixtures/store.json` | Product tests against a fake store built from real captured data |
 | `vercel.json` | Function config (`maxDuration: 60`) |
 | `package.json` | ESM + Node 22 + `npm test` |
 | `test/chat.test.js` | Backend and no-secret-in-frontend tests |

@@ -78,6 +78,28 @@ body{
 .tw-bubble.md pre code{background:none;padding:0;font-size:.88em}
 .tw-bubble.md a{color:var(--brand);text-decoration:underline;text-underline-offset:2px}
 .tw-bubble.md hr{border:0;border-top:1px solid var(--line);margin:.8em 0}
+/* Product cards (real TestAllWater catalog items) sit in their own row under the bubble */
+.tw-row.tw-products{margin-top:-8px;padding-left:41px}
+.tw-pcards{display:flex;flex-direction:column;gap:10px;width:min(620px,100%)}
+.tw-pcard{display:flex;gap:14px;padding:13px;background:#fff;border:1px solid #e3e9ed;border-radius:17px;box-shadow:0 5px 18px rgba(25,48,65,.045);transition:box-shadow .2s ease,transform .2s ease}
+.tw-pcard:hover{box-shadow:0 10px 26px rgba(25,48,65,.09);transform:translateY(-1px)}
+.tw-pimg{flex:0 0 92px;width:92px;height:92px;border-radius:13px;background:#f3f7fa;border:1px solid #e8eef2;display:grid;place-items:center;overflow:hidden;text-decoration:none}
+.tw-pimg img{width:100%;height:100%;object-fit:contain;padding:6px;box-sizing:border-box}
+.tw-pimg.tw-noimg{color:#9aa5ad;font-size:11px;text-align:center;padding:6px}
+.tw-pbody{flex:1;min-width:0;display:flex;flex-direction:column;gap:5px}
+.tw-pvendor{font-size:10.5px;letter-spacing:.09em;text-transform:uppercase;font-weight:800;color:var(--muted)}
+.tw-ptitle{font-family:"Plus Jakarta Sans",sans-serif;font-size:14px;font-weight:700;line-height:1.35;color:var(--ink);text-decoration:none;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.tw-ptitle:hover{color:var(--brand)}
+.tw-pmeta{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.tw-pprice{font-family:"Plus Jakarta Sans",sans-serif;font-size:17px;font-weight:800;color:var(--brand-dark);letter-spacing:-.01em}
+.tw-pstock{font-size:11px;font-weight:700;color:#1a8a52;background:#e7f8ef;border-radius:999px;padding:3px 9px}
+.tw-preason{margin:0;font-size:12.5px;line-height:1.55;color:#5b6b75}
+.tw-pactions{display:flex;gap:8px;flex-wrap:wrap;margin-top:4px}
+.tw-pbtn{display:inline-flex;align-items:center;justify-content:center;height:36px;padding:0 15px;border-radius:11px;font-family:"DM Sans",sans-serif;font-size:13px;font-weight:700;text-decoration:none;cursor:pointer;transition:transform .2s ease,box-shadow .2s ease,background .2s ease;white-space:nowrap}
+.tw-pbtn:hover{transform:translateY(-1px)}
+.tw-pbtn-primary{background:linear-gradient(135deg,var(--brand),#0872bd);color:#fff;box-shadow:0 7px 17px rgba(10,95,159,.18)}
+.tw-pbtn-ghost{background:#fff;color:var(--brand);border:1px solid #cfe0ec}
+.tw-pbtn-ghost:hover{background:#f5fbff;border-color:#9cc7e4}
 .tw-welcome{padding:17px 18px;border:1px solid #dcecf5;background:linear-gradient(135deg,#f6fbfe,#fff);border-radius:18px;margin:2px 0 24px}
 .tw-welcome b{font-family:"Plus Jakarta Sans";font-size:14px}.tw-welcome p{font-size:13px;color:#71808b;line-height:1.65;margin:7px 0 0}
 .tw-quick{padding:11px 22px 6px;display:flex;gap:8px;flex-wrap:wrap;background:#fff;border-top:1px solid var(--line)}
@@ -97,6 +119,8 @@ body{
 @media(max-width:760px){
  .tw-wrap{padding:20px 12px 45px}.tw-launch{padding:30px 24px;display:block}.tw-copy h1{font-size:28px}.tw-open{margin-top:23px;width:100%}
  .tw-body{height:650px}.tw-messages{padding:21px 15px 14px}.tw-bubble{max-width:88%}.tw-quick{padding:10px 14px 6px}.tw-inputbar{padding:10px}
+ .tw-row.tw-products{padding-left:0}.tw-pcard{gap:11px;padding:11px}.tw-pimg{flex-basis:76px;width:76px;height:76px}
+ .tw-pbtn{flex:1 1 120px}
 }
 </style>
 </head>
@@ -127,7 +151,7 @@ body{
       <div class="tw-inputwrap"><input class="tw-input" id="input" placeholder="Tell me about your water…" autocomplete="off"></div>
       <button class="tw-send" id="send" aria-label="Send">↑</button>
      </form>
-     <div class="tw-foot">AI assistant · Prototype testing mode · Live product catalog will be connected later</div>
+     <div class="tw-foot">AI assistant · Prototype testing mode · Products from the live TestAllWater catalog</div>
     </div>
    </div>
   </section>
@@ -276,7 +300,101 @@ function friendlyError(e){
   return "I'm getting a lot of questions right now. Please try again in a moment.";
  return "Sorry, something went wrong on my side and I couldn't answer that. Please try again.";
 }
+/* Product cards. The data comes from our own /api/chat (built from the live Shopify catalog), but
+   every value is re-checked here so a bad one is never shown: links must be https on the store's
+   domain, images must come from Shopify's CDN, and the price must look like a GBP amount, otherwise
+   that product is skipped. Text is set with textContent only; nothing is ever parsed as HTML. */
+const SHOP_HOST="testallwater.co.uk",IMG_HOSTS=["cdn.shopify.com","testallwater.co.uk"];
+const PRICE_OK=/^(?:From )?£\d{1,3}(?:,\d{3})*\.\d{2}$/;
+function shopUrl(u,exactPath,prefix){
+ try{
+  const x=new URL(u);
+  if(x.protocol!=="https:"||x.host!==SHOP_HOST)return null;
+  if(exactPath&&x.pathname!==exactPath)return null;
+  if(prefix&&!x.pathname.startsWith(prefix))return null;
+  return x.href;
+ }catch(e){return null}
+}
+function imgUrl(u){
+ try{const x=new URL(u);return x.protocol==="https:"&&IMG_HOSTS.includes(x.host)?x.href:null}catch(e){return null}
+}
+function cardLink(doc,cls,href,text){
+ const a=doc.createElement("a");a.className=cls;
+ a.setAttribute("href",href);a.setAttribute("target","_blank");a.setAttribute("rel","noopener noreferrer");
+ if(text)a.textContent=text;
+ return a;
+}
+function productCard(p,doc){
+ if(!p||typeof p!=="object"||p.available===false)return null;
+ const url=shopUrl(p.url,null,"/products/");
+ const title=typeof p.title==="string"?p.title.trim().slice(0,200):"";
+ const price=p.price&&typeof p.price.display==="string"?(p.price.from?"From ":"")+p.price.display:"";
+ if(!url||!title||!PRICE_OK.test(price))return null;
+
+ const card=doc.createElement("article");card.className="tw-pcard";
+ card.setAttribute("role","listitem");card.setAttribute("aria-label",title);
+
+ const src=imgUrl(p.image);
+ let imgBox;
+ if(src){
+  imgBox=cardLink(doc,"tw-pimg",url);imgBox.setAttribute("aria-label","View "+title);
+  const img=doc.createElement("img");
+  img.setAttribute("src",src);img.setAttribute("alt",title);img.setAttribute("loading","lazy");
+  img.setAttribute("width","92");img.setAttribute("height","92");
+  if(img.addEventListener)img.addEventListener("error",()=>{imgBox.className="tw-pimg tw-noimg";imgBox.textContent="No image"});
+  imgBox.appendChild(img);
+ }else{
+  imgBox=doc.createElement("div");imgBox.className="tw-pimg tw-noimg";imgBox.textContent="No image";
+ }
+ card.appendChild(imgBox);
+
+ const body=doc.createElement("div");body.className="tw-pbody";
+ if(typeof p.vendor==="string"&&p.vendor.trim()){
+  const v=doc.createElement("div");v.className="tw-pvendor";v.textContent=p.vendor.trim().slice(0,60);body.appendChild(v);
+ }
+ body.appendChild(cardLink(doc,"tw-ptitle",url,title));
+
+ const meta=doc.createElement("div");meta.className="tw-pmeta";
+ const pr=doc.createElement("span");pr.className="tw-pprice";pr.textContent=price;meta.appendChild(pr);
+ const st=doc.createElement("span");st.className="tw-pstock";st.textContent="In stock";meta.appendChild(st);
+ body.appendChild(meta);
+
+ if(typeof p.reason==="string"&&p.reason.trim()){
+  const r=doc.createElement("p");r.className="tw-preason";r.textContent=p.reason.trim().slice(0,240);body.appendChild(r);
+ }
+
+ const actions=doc.createElement("div");actions.className="tw-pactions";
+ actions.appendChild(cardLink(doc,"tw-pbtn tw-pbtn-primary",url,"View Product"));
+ const cart=shopUrl(p.addToCartUrl,"/cart/add");
+ if(cart&&/^\d+$/.test(new URL(cart).searchParams.get("id")||""))actions.appendChild(cardLink(doc,"tw-pbtn tw-pbtn-ghost",cart,"Add to Cart"));
+ body.appendChild(actions);
+
+ card.appendChild(body);
+ return card;
+}
+/* Appends up to three valid cards to parent and returns the products that were shown. */
+function renderProductCards(list,doc,parent){
+ const shown=[];
+ for(const p of (Array.isArray(list)?list:[]).slice(0,3)){
+  const card=productCard(p,doc);
+  if(card){parent.appendChild(card);shown.push(p)}
+ }
+ return shown;
+}
 /*</render>*/
+const shownProducts=new Set();
+function addProducts(list){
+ /* A product already shown earlier in this chat is not shown again. */
+ const fresh=(Array.isArray(list)?list:[]).filter(p=>p&&typeof p.url==="string"&&!shownProducts.has(p.url));
+ if(!fresh.length)return;
+ const wrap=document.createElement('div');wrap.className='tw-pcards';wrap.setAttribute('role','list');wrap.setAttribute('aria-label','Matching products');
+ const rendered=renderProductCards(fresh,document,wrap);
+ if(!rendered.length)return;
+ rendered.forEach(p=>shownProducts.add(p.url));
+ const row=document.createElement('div');row.className='tw-row assistant tw-products';
+ row.appendChild(wrap);messages.appendChild(row);
+ requestAnimationFrame(()=>messages.scrollTop=messages.scrollHeight);
+}
 function addMessage(role,text){
  const row=document.createElement('div');row.className='tw-row '+role;
  if(role==='assistant'){const av=document.createElement('div');av.className='tw-avatar';av.textContent='AI';row.appendChild(av)}
@@ -309,6 +427,7 @@ async function ask(text){
   if(!reply) throw new Error("The AI returned an empty response.");
   history.push({role:"assistant",content:reply});
   addMessage("assistant",reply);
+  addProducts(data.products);
  }catch(e){
   /* The failed exchange is not added to history as an assistant turn, so the next message
      continues the conversation normally; the server treats a resent message as unanswered. */

@@ -7,6 +7,6 @@
     "node": "22.x"
   },
   "scripts": {
-    "test": "node --test test/chat.test.js test/ui.test.js"
+    "test": "node --test test/chat.test.js test/ui.test.js test/shop.test.js"
   }
 }

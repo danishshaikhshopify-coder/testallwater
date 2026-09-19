@@ -43,6 +43,7 @@ let logs;
 beforeEach(() => {
   process.env.NARA_ROUTER_API_KEY = "test-key";
   process.env.NARA_ROUTER_BASE_URL = "https://router.example/v1/";
+  process.env.SHOPIFY_CATALOG = "off";
   logs = { out: [], err: [] };
   mock.method(console, "log", (line) => logs.out.push(line));
   mock.method(console, "error", (line) => logs.err.push(line));
@@ -83,6 +84,7 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
 async function callAdvancing(steps, options) {
   mock.timers.enable({ apis: ["setTimeout", "Date"] });
   const pending = call(options);
+  await flush(); // let the handler reach the model call, where the attempt timer is created
   for (const ms of steps) {
     mock.timers.tick(ms);
     await flush();
@@ -329,6 +331,7 @@ test("each attempt gets exactly 9s: 2 stalled attempts fail at 18s with a clear 
   mock.timers.enable({ apis: ["setTimeout"] });
   let settled = false;
   const pending = call(HI).then((res) => ((settled = true), res));
+  await flush();
 
   mock.timers.tick(8999);
   await flush();
@@ -815,7 +818,10 @@ test("index.html always calls /api/chat and has no key, system prompt, or demo f
 });
 
 test("no source file contains a hardcoded secret", () => {
-  const files = ["index.html", "api/chat.js", "vercel.json", "package.json", "README.md", ...readdirSync(new URL("test/", root)).map((f) => `test/${f}`)];
+  const listed = (dir) => readdirSync(new URL(dir, root), { withFileTypes: true }).filter((e) => e.isFile()).map((e) => `${dir}${e.name}`);
+  // every file we ship or test with, including the API helpers and the captured store fixture
+  const files = ["index.html", "vercel.json", "package.json", "README.md", ...listed("api/"), ...listed("test/"), ...listed("test/fixtures/")];
+  assert.ok(files.includes("api/_catalog.js") && files.includes("test/fixtures/store.json"));
   for (const f of files) {
     const text = readFileSync(new URL(f, root), "utf8");
     assert.doesNotMatch(text, /sk-[A-Za-z0-9_-]{16,}/, `${f} looks like it contains an API key`);
