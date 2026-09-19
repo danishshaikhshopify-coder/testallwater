@@ -465,24 +465,89 @@ test("uses Vercel's request id for log correlation when present", async () => {
   assert.equal(JSON.parse(logs.out[0]).requestId, "bom1::abc");
 });
 
-test("unwraps a JSON-object reply (seen from nex-n2.5-pro) to just its message text", async () => {
-  mockUpstream(ok('{"water_type":"aquarium","message":"First, are your fish freshwater or saltwater?"}'));
-  const res = await call(HI);
-  assert.equal(res.statusCode, 200);
-  assert.equal(res.payload.reply, "First, are your fish freshwater or saltwater?");
-  assert.equal(JSON.parse(logs.out[0]).unwrappedJson, true);
+// nex-n2.5-pro sometimes replies with a JSON object instead of prose (9 of 187 live replies).
+// Customers must never see raw JSON. These are the shapes actually observed.
+test("a JSON reply with a prose field shows just that text, whichever key the model used", async () => {
+  const shapes = [
+    ['{"message":"First, are your fish freshwater or saltwater?"}', "First, are your fish freshwater or saltwater?"],
+    ['{"water_type":"aquarium","message":"First, are your fish freshwater or saltwater?"}', "First, are your fish freshwater or saltwater?"],
+    ['{"response":"Thanks, I\'ve got that. Is it **freshwater**?"}', "Thanks, I've got that. Is it **freshwater**?"],
+    ['{"answer":"For routine screening, test coliform and nitrate."}', "For routine screening, test coliform and nitrate."],
+    ['{"assistant_response":"Are they gasping at the surface?"}', "Are they gasping at the surface?"],
+    ['{"assistantMessage":"Urgent: test ammonia and nitrite now."}', "Urgent: test ammonia and nitrite now."],
+    ['{"reply":"  padded  "}', "padded"],
+    ['{"text":"via text key"}', "via text key"],
+    ['{"answer":"A","message":"B"}', "B"], // fixed key priority, not object order
+    ['{"message":"  ","response":"used the non-blank one"}', "used the non-blank one"],
+  ];
+  for (const [raw, expected] of shapes) {
+    logs.out.length = 0;
+    mockUpstream(ok(raw));
+    const res = await call(HI);
+    assert.equal(res.statusCode, 200, raw);
+    assert.equal(res.payload.reply, expected, raw);
+    assert.equal(JSON.parse(logs.out[0]).unwrappedJson, "prose");
+  }
 });
 
-test("leaves every other reply untouched (prose, JSON without a usable message, stray braces)", async () => {
+test("a structured JSON reply (no prose field) is shown as a readable list, not raw JSON", async () => {
+  mockUpstream(
+    ok(
+      JSON.stringify({
+        water_type: "aquarium",
+        parameters: ["ammonia", "nitrite", "nitrate", "pH", "dissolved oxygen"],
+        test_format: "liquid drop test kit",
+        testReason: "Gasping at the surface points to low oxygen or ammonia",
+        urgent: true,
+        notes: "   ",
+      })
+    )
+  );
+  const res = await call(HI);
+  assert.equal(res.statusCode, 200);
+  assert.equal(
+    res.payload.reply,
+    [
+      "- **Water type:** aquarium",
+      "- **Parameters:** ammonia, nitrite, nitrate, pH, dissolved oxygen",
+      "- **Test format:** liquid drop test kit",
+      "- **Test reason:** Gasping at the surface points to low oxygen or ammonia",
+      "- **Urgent:** true",
+    ].join("\n")
+  );
+  assert.doesNotMatch(res.payload.reply, /[{}"]/);
+  assert.equal(JSON.parse(logs.out[0]).unwrappedJson, "fields");
+});
+
+test("JSON that cannot be rendered is an error, never shown to the customer", async () => {
+  for (const raw of [
+    '{"messages":[{"role":"user","content":"My aquarium fish are gasping"}]}', // nested objects
+    '{"message":"   "}', // blank
+    "{}",
+    '{"a":{"b":1}}',
+  ]) {
+    logs.out.length = 0;
+    logs.err.length = 0;
+    mockUpstream(ok(raw));
+    const res = await call(HI);
+    assert.equal(res.statusCode, 502, raw);
+    assert.equal(res.payload.code, "bad_response");
+    assert.equal(res.payload.reply, undefined);
+    assert.equal(JSON.parse(logs.err[0]).unwrappedJson, "unrenderable");
+  }
+});
+
+test("replies that are not a JSON object are left exactly as written", async () => {
   const untouched = [
     "Plain answer",
     "**Test** chlorine and pH.\n\n- Free chlorine\n- pH",
-    '{"water_type":"aquarium"}',
-    '{"message": 42}',
-    '{"message": "   "}',
     "{not json}",
     "Use {braces} carefully",
     'Prefix {"message":"x"}',
+    '{"message":"x"} and then more prose',
+    "[1, 2, 3]",
+    '["a","b"]',
+    "```json\n{\"message\":\"in a code block\"}\n```",
   ];
   for (const text of untouched) {
     logs.out.length = 0;

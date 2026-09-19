@@ -177,18 +177,48 @@ function upstreamMessage(data) {
   return (typeof found === "string" ? found : JSON.stringify(found)).slice(0, 300);
 }
 
-// nex-n2.5-pro occasionally answers with a JSON object instead of prose, e.g.
-// {"water_type":"aquarium","message":"First, are your fish freshwater or saltwater?"}
-// (seen once in ~50 replies). Show the customer just the message text.
-function unwrapJsonMessage(reply) {
-  if (!reply.startsWith("{") || !reply.endsWith("}")) return reply;
+// nex-n2.5-pro sometimes answers with a JSON object instead of prose (9 of 187 replies in
+// live testing, mostly aquarium questions), and the key varies: {"message": ...},
+// {"response": ...}, {"answer": ...}, {"assistant_response": ...}, {"assistantMessage": ...},
+// or a structured object like {"water_type": ..., "parameters": [...], "test_format": ...}.
+// Customers must never see raw JSON, so:
+//   1. an object with a prose field   -> show just that text
+//   2. a flat object of plain values  -> show it as a readable bullet list
+//   3. anything else that is JSON     -> not renderable (caller reports an error)
+// Replies that are not a JSON object are returned untouched.
+const PROSE_KEYS = ["message", "response", "reply", "answer", "assistantmessage", "assistantresponse", "text", "content"];
+const keyId = (key) => key.toLowerCase().replace(/[^a-z]/g, "");
+const isPlain = (v) => ["string", "number", "boolean"].includes(typeof v);
+const humanizeKey = (key) => {
+  const words = key.replace(/[_-]+/g, " ").replace(/([a-z])([A-Z])/g, "$1 $2").trim().toLowerCase();
+  return words.charAt(0).toUpperCase() + words.slice(1);
+};
+
+function unwrapJsonReply(reply) {
+  if (!reply.startsWith("{") || !reply.endsWith("}")) return { text: reply };
+  let obj;
   try {
-    const parsed = JSON.parse(reply);
-    if (typeof parsed?.message === "string" && parsed.message.trim()) return parsed.message.trim();
+    obj = JSON.parse(reply);
   } catch {
-    // not JSON: leave the reply untouched
+    return { text: reply }; // not JSON (e.g. prose that happens to use braces)
   }
-  return reply;
+  if (!obj || typeof obj !== "object" || Array.isArray(obj)) return { text: reply };
+
+  const keys = new Map(Object.keys(obj).map((k) => [keyId(k), k]));
+  for (const id of PROSE_KEYS) {
+    const value = obj[keys.get(id)];
+    if (typeof value === "string" && value.trim()) return { text: value.trim(), unwrapped: "prose" };
+  }
+
+  const entries = Object.entries(obj).filter(([, v]) => !(typeof v === "string" && !v.trim()));
+  const flat = entries.every(([, v]) => isPlain(v) || (Array.isArray(v) && v.every(isPlain)));
+  if (entries.length && flat) {
+    const list = entries
+      .map(([k, v]) => `- **${humanizeKey(k)}:** ${Array.isArray(v) ? v.join(", ") : v}`)
+      .join("\n");
+    return { text: list, unwrapped: "fields" };
+  }
+  return { text: null, unwrapped: "unrenderable" };
 }
 
 // One JSON log line per request for Vercel Runtime Logs. Never includes the API
@@ -286,9 +316,12 @@ async function attemptOnce({ baseUrl, apiKey, messages, meta }) {
           : "The AI returned an empty answer. Please try again."
       );
     }
-    const shown = unwrapJsonMessage(reply);
-    if (shown !== reply) meta.unwrappedJson = true;
-    return shown;
+    const { text, unwrapped } = unwrapJsonReply(reply);
+    if (unwrapped) meta.unwrappedJson = unwrapped;
+    if (text === null) {
+      throw new ChatError("bad_response", 502, "The AI service returned an unreadable response.");
+    }
+    return text;
   })();
 
   try {

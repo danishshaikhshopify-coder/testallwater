@@ -293,6 +293,31 @@ test("page: assistant replies render Markdown; the user's own text stays plain",
   assert.doesNotMatch(textOf(assistant.bubble), /\*\*/);
 });
 
+test("page: a JSON-shaped model reply reaches the customer as normal formatted text, never as JSON", async () => {
+  scriptUpstream(
+    ok('{"response":"Thanks, I\'ve got that. Is this a **freshwater** or **saltwater** aquarium?"}'),
+    ok(JSON.stringify({ water_type: "aquarium", parameters: ["ammonia", "nitrite"], test_format: "liquid drop kit" })),
+    ok('{"messages":[{"role":"user","content":"x"}]}')
+  );
+  const page = bootPage(apiFetch);
+
+  await page.send("My aquarium fish are gasping at the surface");
+  await page.send("It is freshwater and about 60 litres");
+  await page.send("Anything else I should check?");
+
+  const [, first, , second, , third] = page.rows();
+  assert.equal(textOf(first.bubble), "Thanks, I've got that. Is this a freshwater or saltwater aquarium?");
+  assert.match(toHtml(first.bubble), /<strong>freshwater<\/strong>/);
+  assert.equal(
+    second.bubble.children.map(toHtml).join(""),
+    "<ul><li><strong>Water type:</strong> aquarium</li><li><strong>Parameters:</strong> ammonia, nitrite</li><li><strong>Test format:</strong> liquid drop kit</li></ul>"
+  );
+  // unrenderable JSON becomes the friendly error, not a JSON dump
+  assert.match(textOf(third.bubble), /something went wrong/);
+  for (const { role, bubble } of page.rows()) if (role === "assistant") assert.doesNotMatch(textOf(bubble), /[{}]|"role"/);
+  assert.ok(page.isIdle());
+});
+
 test("page: the raw Markdown text (not HTML) is what goes back to the model as history", async () => {
   const upstream = scriptUpstream(ok("**Bold** answer"), ok("second"));
   const page = bootPage(apiFetch);
