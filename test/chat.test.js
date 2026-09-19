@@ -76,11 +76,44 @@ function mockDeadSocket() {
   globalThis.fetch = () => new Promise(() => {});
 }
 
-async function callWithClockAdvance(ms, options) {
-  mock.timers.enable({ apis: ["setTimeout"] });
+const flush = () => new Promise((resolve) => setImmediate(resolve));
+
+// Each attempt's timer is only created after the previous attempt has settled, so the
+// mocked clock is advanced one step (one attempt) at a time.
+async function callAdvancing(steps, options) {
+  mock.timers.enable({ apis: ["setTimeout", "Date"] });
   const pending = call(options);
-  mock.timers.tick(ms);
+  for (const ms of steps) {
+    mock.timers.tick(ms);
+    await flush();
+  }
   return pending;
+}
+
+// Scripted upstream: what attempt 1, attempt 2, ... do. The last step repeats.
+//   "stall"   headers arrive, body never finishes (until aborted)
+//   "dead"    never answers and ignores abort
+//   "network" fetch throws (connection refused / reset)
+//   {status, body}  a normal HTTP answer
+function mockSequence(...steps) {
+  upstreamCalls = [];
+  globalThis.fetch = async (url, init) => {
+    upstreamCalls.push({ url, init, body: JSON.parse(init.body) });
+    const step = steps[Math.min(upstreamCalls.length - 1, steps.length - 1)];
+    if (step === "dead") return new Promise(() => {});
+    if (step === "network") throw new TypeError("fetch failed");
+    if (step === "stall") {
+      const body = new ReadableStream({
+        start(controller) {
+          init.signal.addEventListener("abort", () =>
+            controller.error(new DOMException("aborted", "AbortError"))
+          );
+        },
+      });
+      return new Response(body, { status: 200 });
+    }
+    return new Response(JSON.stringify(step.body), { status: step.status ?? 200 });
+  };
 }
 
 test("rejects non-POST requests", async () => {
@@ -184,7 +217,7 @@ test("returns a JSON error with the upstream message and no canned reply when th
   assert.match(res.payload.error, /HTTP 404.*model not found/);
   assert.equal(res.payload.reply, undefined);
 
-  mockUpstream(new Error("network down"));
+  mockSequence("network");
   res = await call(HI);
   assert.equal(res.statusCode, 502);
   assert.equal(res.payload.code, "unreachable");
@@ -256,42 +289,131 @@ test("an unreadable 200 response is a bad_response error, not an empty reply", a
   assert.equal(res.payload.code, "bad_response");
 });
 
-test("times out with a JSON 504 when the upstream body stalls (was: bogus 'empty response')", async () => {
-  mockStalledBody();
-  const res = await callWithClockAdvance(20000, HI);
-  assert.equal(res.statusCode, 504);
-  assert.equal(res.payload.code, "timeout");
-  assert.match(res.payload.error, /took too long to respond \(over 20s\)\. Please try again\./);
-  assert.equal(res.payload.reply, undefined);
+const ATTEMPT_MS = 9000;
+const TIMEOUT_MESSAGE = "The AI took too long to respond (tried 2 times, 9s each). Please try again.";
+
+test("a stalled first attempt is retried and the second attempt's reply is returned", async () => {
+  mockSequence("stall", ok("second attempt reply"));
+  const res = await callAdvancing([ATTEMPT_MS], HI);
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.payload.reply, "second attempt reply");
+  assert.equal(res.payload.model, "nemotron-3.5-lightning-free");
+  assert.equal(upstreamCalls.length, 2);
+  // Identical request both times: same URL, key, model, effort, tokens and messages.
+  assert.equal(upstreamCalls[1].url, upstreamCalls[0].url);
+  assert.equal(upstreamCalls[1].init.headers.Authorization, "Bearer test-key");
+  assert.deepEqual(upstreamCalls[1].body, upstreamCalls[0].body);
+  assert.deepEqual(JSON.parse(logs.out[0]).attempts.map((a) => a.outcome), ["timeout", "ok"]);
 });
 
-test("the 20s deadline fires at exactly 20s, not before", async () => {
-  mockStalledBody();
+test("an attempt that never answers (and ignores abort) is also retried", async () => {
+  mockSequence("dead", ok("recovered"));
+  const res = await callAdvancing([ATTEMPT_MS], HI);
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.payload.reply, "recovered");
+  assert.equal(upstreamCalls.length, 2);
+});
+
+test("a first-attempt success is returned immediately, with no second attempt", async () => {
+  mockSequence(ok("instant"));
+  const res = await callAdvancing([], HI); // clock never advanced
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.payload.reply, "instant");
+  assert.equal(upstreamCalls.length, 1);
+  assert.deepEqual(JSON.parse(logs.out[0]).attempts.map((a) => a.outcome), ["ok"]);
+});
+
+test("each attempt gets exactly 9s: 2 stalled attempts fail at 18s with a clear 504", async () => {
+  mockSequence("stall");
   mock.timers.enable({ apis: ["setTimeout"] });
   let settled = false;
   const pending = call(HI).then((res) => ((settled = true), res));
 
-  mock.timers.tick(19999);
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(settled, false, "must still be waiting at 19.999s");
+  mock.timers.tick(8999);
+  await flush();
+  assert.equal(upstreamCalls.length, 1, "attempt 1 still running at 8.999s");
 
-  mock.timers.tick(1);
+  mock.timers.tick(1); // attempt 1 times out at 9s -> attempt 2 starts
+  await flush();
+  assert.equal(upstreamCalls.length, 2);
+  assert.equal(settled, false);
+
+  mock.timers.tick(8999);
+  await flush();
+  assert.equal(settled, false, "attempt 2 still running at 17.999s");
+
+  mock.timers.tick(1); // attempt 2 times out at 18s
   const res = await pending;
   assert.equal(res.statusCode, 504);
   assert.equal(res.payload.code, "timeout");
+  assert.equal(res.payload.error, TIMEOUT_MESSAGE);
+  assert.equal(res.payload.reply, undefined);
+  assert.equal(upstreamCalls.length, 2, "never a third attempt");
 });
 
-test("times out with a JSON 504 even if the connection never answers or honours abort", async () => {
-  mockDeadSocket();
-  const res = await callWithClockAdvance(20000, HI);
+test("two attempts that never answer return the same clear 504", async () => {
+  mockSequence("dead");
+  const res = await callAdvancing([ATTEMPT_MS, ATTEMPT_MS], HI);
   assert.equal(res.statusCode, 504);
-  assert.equal(res.payload.code, "timeout");
+  assert.equal(res.payload.error, TIMEOUT_MESSAGE);
+  assert.equal(upstreamCalls.length, 2);
 });
 
-test("does not time out before the deadline", async () => {
-  mockUpstream(ok("fast enough"));
-  const res = await callWithClockAdvance(19000, HI);
+test("a network failure is retried once", async () => {
+  mockSequence("network", ok("after reconnect"));
+  const res = await callAdvancing([], HI);
   assert.equal(res.statusCode, 200);
+  assert.equal(res.payload.reply, "after reconnect");
+  assert.equal(upstreamCalls.length, 2);
+  assert.deepEqual(JSON.parse(logs.out[0]).attempts.map((a) => a.outcome), ["unreachable", "ok"]);
+});
+
+test("two network failures return a clear 502", async () => {
+  mockSequence("network");
+  const res = await callAdvancing([], HI);
+  assert.equal(res.statusCode, 502);
+  assert.equal(res.payload.code, "unreachable");
+  assert.match(res.payload.error, /Could not reach the AI service/);
+  assert.equal(upstreamCalls.length, 2);
+});
+
+test("a timeout followed by a 429 returns the 429 (the last real answer)", async () => {
+  mockSequence("stall", { status: 429, body: { error: { message: "slow down" } } });
+  const res = await callAdvancing([ATTEMPT_MS], HI);
+  assert.equal(res.statusCode, 429);
+  assert.equal(res.payload.code, "rate_limited");
+  assert.equal(upstreamCalls.length, 2);
+});
+
+test("never retries an upstream answer: 400, 401, 403, 429 (or 5xx, bad or empty bodies)", async () => {
+  const answers = [
+    [400, 502, "upstream_error"],
+    [401, 502, "upstream_error"],
+    [403, 502, "upstream_error"],
+    [429, 429, "rate_limited"],
+    [500, 502, "upstream_error"],
+    [502, 502, "upstream_error"],
+  ];
+  for (const [upstreamStatus, expectedStatus, expectedCode] of answers) {
+    mockSequence({ status: upstreamStatus, body: { error: { message: "nope" } } }, ok("must not be used"));
+    const res = await call(HI);
+    assert.equal(upstreamCalls.length, 1, `HTTP ${upstreamStatus} must not be retried`);
+    assert.equal(res.statusCode, expectedStatus, `HTTP ${upstreamStatus}`);
+    assert.equal(res.payload.code, expectedCode);
+  }
+
+  mockSequence({ status: 200, body: { choices: [{ message: { content: "" } }] } }, ok("must not be used"));
+  assert.equal((await call(HI)).payload.code, "empty_reply");
+  assert.equal(upstreamCalls.length, 1);
+
+  upstreamCalls = [];
+  globalThis.fetch = async (url, init) => {
+    upstreamCalls.push({ url, init });
+    return new Response("not json", { status: 200 });
+  };
+  assert.equal((await call(HI)).payload.code, "bad_response");
+  assert.equal(upstreamCalls.length, 1);
 });
 
 test("logs one structured line per request, without the key or message text", async () => {
@@ -320,17 +442,19 @@ test("logs one structured line per request, without the key or message text", as
   assert.doesNotMatch(logs.out[0], /test-key|private pool question|answer/);
 });
 
-test("logs failures at error level with the outcome and timings", async () => {
-  mockStalledBody();
-  await callWithClockAdvance(20000, HI);
+test("logs failures at error level with per-attempt outcomes and timings", async () => {
+  mockSequence("stall");
+  await callAdvancing([ATTEMPT_MS, ATTEMPT_MS], HI);
 
   assert.equal(logs.out.length, 0);
   assert.equal(logs.err.length, 1);
   const entry = JSON.parse(logs.err[0]);
   assert.equal(entry.outcome, "timeout");
-  assert.equal(entry.upstreamStatus, 200);
+  assert.deepEqual(entry.attempts.map((a) => a.outcome), ["timeout", "timeout"]);
+  assert.deepEqual(entry.attempts.map((a) => a.ms), [9000, 9000]);
+  assert.equal(entry.upstreamStatus, 200); // last attempt's headers arrived
   assert.equal(typeof entry.headersMs, "number");
-  assert.equal(entry.bodyMs, undefined);
+  assert.equal(entry.bodyMs, undefined); // ...but its body never did
   assert.doesNotMatch(logs.err[0], /test-key/);
 });
 
@@ -369,14 +493,17 @@ test("index.html clears the thinking state and abort timer in a finally block", 
   assert.ok(askFn.indexOf("clearTimeout(timer)") > askFn.indexOf("res.json()"));
 });
 
-test("the browser's safety timer outlasts the backend deadline, which fits maxDuration", () => {
+test("worst-case backend time (2 x 9s) fits inside the browser's 30s limit and maxDuration", () => {
   const html = readFileSync(new URL("index.html", root), "utf8");
   const api = readFileSync(new URL("api/chat.js", root), "utf8");
   const vercel = JSON.parse(readFileSync(new URL("vercel.json", root), "utf8"));
   const browserMs = Number(/controller\.abort\(\),(\d+)\)/.exec(html)[1]);
-  const backendMs = Number(/const MODEL_TIMEOUT_MS = (\d+)/.exec(api)[1]);
-  assert.equal(backendMs, 20000);
-  assert.ok(browserMs > backendMs, `browser ${browserMs}ms must exceed backend ${backendMs}ms`);
+  const attemptMs = Number(/const ATTEMPT_TIMEOUT_MS = (\d+)/.exec(api)[1]);
+  const attempts = Number(/const MAX_ATTEMPTS = (\d+)/.exec(api)[1]);
+  assert.equal(attemptMs, 9000);
+  assert.equal(attempts, 2);
+  assert.equal(browserMs, 30000);
+  assert.ok(attemptMs * attempts < browserMs, `backend worst case ${attemptMs * attempts}ms must be under browser ${browserMs}ms`);
   assert.ok(browserMs < vercel.functions["api/chat.js"].maxDuration * 1000);
 });
 

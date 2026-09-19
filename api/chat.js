@@ -9,10 +9,13 @@ const MODEL = "nemotron-3.5-lightning-free";
 // and at "low" about one in three still hit the deadline.
 const REASONING_EFFORT = "none";
 
-// The whole upstream exchange (connect + headers + body) gets one hard deadline. It
-// must finish before the browser gives up (30s, see index.html) and well inside
-// maxDuration (60s, see vercel.json), so the client always receives a JSON answer.
-const MODEL_TIMEOUT_MS = 20000;
+// Each attempt (connect + headers + body) gets its own hard deadline. Live data showed
+// this free model either answers within ~12s or stalls indefinitely, so a stalled
+// attempt is abandoned early and retried once. Worst case is 2 x 9s = 18s, inside the
+// browser's 30s limit (see index.html) and maxDuration (60s, see vercel.json), so the
+// client always receives a JSON answer.
+const ATTEMPT_TIMEOUT_MS = 9000;
+const MAX_ATTEMPTS = 2;
 const MAX_OUTPUT_TOKENS = 1000;
 const MAX_HISTORY_MESSAGES = 12;
 const MAX_MESSAGE_CHARS = 4000;
@@ -101,11 +104,11 @@ class ChatError extends Error {
 }
 
 const timeoutError = () =>
-  new ChatError(
-    "timeout",
-    504,
-    `The AI took too long to respond (over ${MODEL_TIMEOUT_MS / 1000}s). Please try again.`
-  );
+  new ChatError("timeout", 504, "The AI took too long to respond. Please try again.");
+
+// Only stalled or unreachable upstreams are worth retrying. Anything the upstream
+// actually answered (400/401/403/429/5xx, bad or empty body) is returned as-is.
+const isRetryable = (error) => error.code === "timeout" || error.code === "unreachable";
 
 function toChatError(error, meta) {
   if (error instanceof ChatError) return error;
@@ -131,7 +134,8 @@ function logRequest(meta) {
   else console.error(line);
 }
 
-async function callModel({ baseUrl, apiKey, messages, meta }) {
+async function attemptOnce({ baseUrl, apiKey, messages, meta }) {
+  const attemptStartedAt = Date.now();
   const controller = new AbortController();
   let timer;
   // The deadline is a race, not only an abort signal, so the client gets an answer
@@ -140,7 +144,7 @@ async function callModel({ baseUrl, apiKey, messages, meta }) {
     timer = setTimeout(() => {
       controller.abort();
       reject(timeoutError());
-    }, MODEL_TIMEOUT_MS);
+    }, ATTEMPT_TIMEOUT_MS);
   });
 
   const exchange = (async () => {
@@ -161,12 +165,12 @@ async function callModel({ baseUrl, apiKey, messages, meta }) {
       signal: controller.signal,
     });
     meta.upstreamStatus = response.status;
-    meta.headersMs = Date.now() - meta.startedAt;
+    meta.headersMs = Date.now() - attemptStartedAt;
 
     // Read the body as text under the same signal: a body that stalls is a timeout,
     // not an "empty response".
     const raw = await response.text();
-    meta.bodyMs = Date.now() - meta.startedAt;
+    meta.bodyMs = Date.now() - attemptStartedAt;
 
     let data = null;
     try {
@@ -226,6 +230,42 @@ async function callModel({ baseUrl, apiKey, messages, meta }) {
   } finally {
     clearTimeout(timer);
   }
+}
+
+// Up to MAX_ATTEMPTS identical requests; the first success is returned immediately.
+async function callModel({ baseUrl, apiKey, messages, meta }) {
+  meta.attempts = [];
+  let lastError;
+
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    // Per-attempt fields describe the attempt that decided the outcome.
+    delete meta.upstreamStatus;
+    delete meta.headersMs;
+    delete meta.bodyMs;
+    delete meta.rawSnippet;
+
+    const startedAt = Date.now();
+    try {
+      const reply = await attemptOnce({ baseUrl, apiKey, messages, meta });
+      meta.attempts.push({ attempt, outcome: "ok", ms: Date.now() - startedAt });
+      return reply;
+    } catch (error) {
+      meta.attempts.push({ attempt, outcome: error.code, ms: Date.now() - startedAt });
+      lastError = error;
+      if (!isRetryable(error)) break;
+    }
+  }
+
+  if (lastError.code === "timeout") {
+    throw new ChatError(
+      "timeout",
+      504,
+      `The AI took too long to respond (tried ${meta.attempts.length} times, ${
+        ATTEMPT_TIMEOUT_MS / 1000
+      }s each). Please try again.`
+    );
+  }
+  throw lastError;
 }
 
 export default async function handler(req, res) {
