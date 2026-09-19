@@ -455,7 +455,7 @@ function productContext(needs, catalog) {
   return "";
 }
 
-const SAYS_NO_MATCH = /\bno (?:matching |suitable |relevant )?(?:product|kit|test)s?\b.{0,40}\b(?:found|available|listed)\b|couldn.?t find (?:a |any )?(?:matching |suitable )?(?:product|kit)|(?:don.?t|do not|doesn.?t|does not) (?:currently )?(?:have|list|stock|sell|carry)/i;
+const SAYS_NO_MATCH = /\bno (?:matching|suitable|relevant)\b[^.\n]{0,60}\b(?:product|kit|test)s?\b|\bno (?:product|kit|test)s?\b.{0,40}\b(?:found|available|listed)\b|couldn.?t find (?:a |any )?(?:matching |suitable )?(?:product|kit)|(?:don.?t|do not|doesn.?t|does not) (?:currently )?(?:have|list|stock|sell|carry)/i;
 const SAYS_UNAVAILABLE = /couldn.?t (?:check|load|reach|access)|can.?t show (?:product|any)|unable to (?:check|show|load)|catalog(?:ue)? (?:is )?(?:un|temporar)/i;
 
 // Cleans the model's text and makes sure the customer is always told plainly when there is no

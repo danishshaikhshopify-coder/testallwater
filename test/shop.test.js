@@ -2,6 +2,7 @@
 // Runs offline against test/fake-store.js, which replays data captured from the live store.
 import { test, beforeEach, afterEach, mock } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import handler from "../api/chat.js";
 import { analyzeNeeds, PARAM_BY_ID } from "../api/_needs.js";
 import { findProducts, buildQueries, selectProducts, buildReason, safeImageUrl, safeProductUrl, resetCatalogState, STORE_ORIGIN as CODE_STORE_ORIGIN } from "../api/_catalog.js";
@@ -472,9 +473,26 @@ test("chat: no matching product: the customer is told plainly, no card is shown,
   assert.match(system, /Do not name, suggest or invent any product/);
 });
 
-test("chat: the no-match line is not repeated when the model already said it", async () => {
-  const { res } = await chat([u("I need a radon test for my well water")], { reply: "I couldn't find a matching product in the catalog for radon, so a lab test is your best route." });
-  assert.equal(res.payload.reply.match(/No matching product found/g), null);
+test("chat: the no-match line is not repeated when the model already said it, however it words it", async () => {
+  const said = [
+    "I couldn't find a matching product in the catalog for radon, so a lab test is your best route.",
+    "No matching PFAS test product was found in the TestAllWater catalog. PFAS needs a laboratory.",
+    "There is no suitable kit in the catalog for that.",
+    "No matching product was found for radon.",
+    "We don't currently stock a radon test.",
+  ];
+  for (const reply of said) {
+    const { res } = await chat([u("I need a radon test for my well water")], { reply });
+    assert.equal(res.payload.reply.match(/No matching product found:/g), null, `duplicated after: ${reply}`);
+  }
+  // ...but it is added when the model says nothing about it
+  const { res } = await chat([u("I need a radon test for my well water")], { reply: "Radon in water is measured by a laboratory." });
+  assert.match(res.payload.reply, /\*\*No matching product found:\*\*/);
+});
+
+test("page CSS: card buttons are a comfortable touch size on phones", () => {
+  const css = readFileSync(new URL("../index.html", import.meta.url), "utf8");
+  assert.match(css, /@media\(max-width:760px\)\{[\s\S]*\.tw-pbtn\{flex:1 1 120px;height:42px\}/);
 });
 
 test("chat: if the catalog cannot be reached the chat still answers, and says so instead of guessing", async () => {
