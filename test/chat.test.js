@@ -509,6 +509,8 @@ test("the same message sent again after an answer is flagged to the model as a r
   assert.equal(sentRoles(), "suau"); // history untouched, still exactly one system message
   assert.match(sentSystem(), /REPEATED MESSAGE/);
   assert.match(sentSystem(), /Do not repeat your earlier answer/);
+  assert.match(sentSystem(), /Do not ask any question you have already asked, even reworded/);
+  assert.match(sentSystem(), /does not sound like a correction/);
   assert.match(sentSystem(), /TestAllWater/); // the normal system prompt is still there
   assert.equal(JSON.parse(logs.out[0]).repeatedMessage, true);
 });
