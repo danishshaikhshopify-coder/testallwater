@@ -195,6 +195,36 @@ test("returns a JSON error with the upstream message and no canned reply when th
   assert.equal(res.payload.code, "empty_reply");
 });
 
+test("surfaces the cause of an upstream failure whatever shape the error body has", async () => {
+  const shapes = [
+    [{ error: "provider overloaded" }, "provider overloaded"],
+    [{ error: { message: "nested message" } }, "nested message"],
+    [{ detail: "bad parameter" }, "bad parameter"],
+    [{ message: "plain message" }, "plain message"],
+  ];
+  for (const [body, expected] of shapes) {
+    mockUpstream({ status: 502, body });
+    const res = await call(HI);
+    assert.equal(res.payload.code, "upstream_error");
+    assert.equal(res.payload.error, `The AI service returned an error (HTTP 502): ${expected}`);
+    assert.equal(res.payload.detail, expected);
+  }
+
+  // Empty body: nothing to show customers, but the logs/detail must say so.
+  upstreamCalls = [];
+  globalThis.fetch = async () => new Response("", { status: 502 });
+  let res = await call(HI);
+  assert.equal(res.payload.error, "The AI service returned an error (HTTP 502).");
+  assert.equal(res.payload.detail, "(empty response body)");
+  assert.equal(JSON.parse(logs.err.at(-1)).errorDetail, "(empty response body)");
+
+  // HTML gateway page: never shown to customers, kept in detail/logs.
+  globalThis.fetch = async () => new Response("<html>502 Bad Gateway</html>", { status: 502 });
+  res = await call(HI);
+  assert.equal(res.payload.error, "The AI service returned an error (HTTP 502).");
+  assert.match(res.payload.detail, /502 Bad Gateway/);
+});
+
 test("explains an empty reply caused by the token limit", async () => {
   mockUpstream({ body: { choices: [{ message: { content: null }, finish_reason: "length" }] } });
   const res = await call(HI);

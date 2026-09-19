@@ -114,6 +114,14 @@ function toChatError(error, meta) {
   return new ChatError("unreachable", 502, "Could not reach the AI service. Please try again.");
 }
 
+// Human-readable message from an upstream error body: {error:{message}}, {error:"..."},
+// {message}, or {detail}.
+function upstreamMessage(data) {
+  const found = typeof data?.error === "string" ? data.error : data?.error?.message ?? data?.message ?? data?.detail;
+  if (!found) return "";
+  return (typeof found === "string" ? found : JSON.stringify(found)).slice(0, 300);
+}
+
 // One JSON log line per request for Vercel Runtime Logs. Never includes the API
 // key or any message text; only sizes, timings and outcomes.
 function logRequest(meta) {
@@ -168,8 +176,11 @@ async function callModel({ baseUrl, apiKey, messages, meta }) {
     }
 
     if (!response.ok) {
-      meta.errorDetail = data?.error?.message || data?.message || meta.rawSnippet || "";
-      meta.upstreamRequestId = data?.error?.request_id;
+      const message = upstreamMessage(data);
+      // errorDetail keeps the raw body when there is no structured message, so logs
+      // and the JSON "detail" field always show why the upstream failed.
+      meta.errorDetail = message || raw.slice(0, 300) || "(empty response body)";
+      meta.upstreamRequestId = data?.error?.request_id || response.headers.get("x-request-id");
       if (response.status === 429) {
         throw new ChatError(
           "rate_limited",
@@ -180,9 +191,7 @@ async function callModel({ baseUrl, apiKey, messages, meta }) {
       throw new ChatError(
         "upstream_error",
         502,
-        `The AI service returned an error (HTTP ${response.status})${
-          meta.errorDetail ? `: ${meta.errorDetail}` : "."
-        }`
+        `The AI service returned an error (HTTP ${response.status})${message ? `: ${message}` : "."}`
       );
     }
 
@@ -260,6 +269,8 @@ export default async function handler(req, res) {
   } catch (error) {
     meta.outcome = error.code;
     logRequest(meta);
-    return res.status(error.status).json({ error: error.message, code: error.code, requestId });
+    return res
+      .status(error.status)
+      .json({ error: error.message, code: error.code, requestId, detail: meta.errorDetail });
   }
 }
