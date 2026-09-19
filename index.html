@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>TestAllWater AI Assistant</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@500;600;700;800&display=swap');
+
+:root{
+ --brand:#0a5f9f;--brand-dark:#074a7c;--brand-soft:#edf7fd;
+ --ink:#15232e;--muted:#71808b;--line:#e5ebef;--surface:#fff;--bg:#f3f7fa;
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{
+ margin:0;background:
+ radial-gradient(circle at 15% 10%,rgba(10,95,159,.07),transparent 30%),
+ radial-gradient(circle at 90% 90%,rgba(10,95,159,.05),transparent 28%),
+ var(--bg);color:var(--ink);font-family:"DM Sans",Arial,sans-serif;
+ -webkit-font-smoothing:antialiased;
+}
+.tw-wrap{max-width:1120px;margin:auto;padding:56px 20px 80px}
+.tw-card{
+ background:rgba(255,255,255,.94);border:1px solid rgba(222,230,236,.9);
+ border-radius:30px;box-shadow:0 25px 70px rgba(20,45,65,.10);
+ overflow:hidden;backdrop-filter:blur(10px)
+}
+.tw-launch{padding:48px;display:flex;align-items:center;justify-content:space-between;gap:42px}
+.tw-copy{max-width:700px}
+.tw-kicker{display:flex;align-items:center;gap:8px;font-size:11px;letter-spacing:.15em;font-weight:800;color:var(--brand);margin-bottom:13px}
+.tw-kicker:before{content:"";width:7px;height:7px;border-radius:50%;background:#2eb36b;box-shadow:0 0 0 5px #e7f8ef}
+.tw-copy h1{font-family:"Plus Jakarta Sans",sans-serif;font-size:38px;line-height:1.1;letter-spacing:-.045em;margin:0 0 14px;font-weight:800}
+.tw-copy p{margin:0;color:var(--muted);font-size:15px;line-height:1.75;max-width:650px}
+.tw-open{
+ position:relative;border:0;background:linear-gradient(135deg,var(--brand),#0872bd);color:#fff;
+ padding:16px 22px;border-radius:14px;font-size:14px;font-weight:800;white-space:nowrap;
+ cursor:pointer;box-shadow:0 10px 25px rgba(10,95,159,.23);transition:transform .22s ease,box-shadow .22s ease;
+ overflow:hidden
+}
+.tw-open:after{content:"";position:absolute;inset:0;background:linear-gradient(110deg,transparent 30%,rgba(255,255,255,.2),transparent 70%);transform:translateX(-120%);transition:transform .6s}
+.tw-open:hover{transform:translateY(-2px);box-shadow:0 14px 30px rgba(10,95,159,.28)}
+.tw-open:hover:after{transform:translateX(120%)}
+.tw-panel{display:grid;grid-template-rows:0fr;opacity:0;transform:translateY(12px);transition:grid-template-rows .5s cubic-bezier(.2,.85,.2,1),opacity .32s ease,transform .5s cubic-bezier(.2,.85,.2,1)}
+.tw-panel.open{grid-template-rows:1fr;opacity:1;transform:none}
+.tw-panel-inner{min-height:0;overflow:hidden;border-top:1px solid var(--line)}
+.tw-head{height:78px;padding:0 24px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;background:rgba(255,255,255,.98)}
+.tw-brand{display:flex;align-items:center;gap:12px}
+.tw-ai-icon{
+ width:42px;height:42px;border-radius:13px;background:linear-gradient(135deg,#084f84,#1684cf);
+ display:grid;place-items:center;color:#fff;font-family:"Plus Jakarta Sans";font-size:12px;font-weight:800;
+ box-shadow:0 8px 18px rgba(8,79,132,.20);position:relative
+}
+.tw-ai-icon:after{content:"";position:absolute;right:-2px;bottom:-2px;width:9px;height:9px;background:#2eb36b;border:2px solid #fff;border-radius:50%}
+.tw-head strong{font-family:"Plus Jakarta Sans";font-size:14px;display:block}
+.tw-online{font-size:11px;color:#77858f;margin-top:4px;display:flex;align-items:center;gap:6px}
+.tw-online i{width:6px;height:6px;background:#2eb36b;border-radius:50%;display:inline-block}
+.tw-close{border:0;background:#f1f4f6;color:#596872;width:38px;height:38px;border-radius:11px;font-size:21px;cursor:pointer;transition:.2s}
+.tw-close:hover{background:#e7edf1;transform:rotate(4deg)}
+.tw-body{height:620px;display:flex;flex-direction:column;background:#f8fafb}
+.tw-messages{flex:1;overflow:auto;padding:30px 28px 16px;scroll-behavior:smooth}
+.tw-messages::-webkit-scrollbar{width:7px}.tw-messages::-webkit-scrollbar-thumb{background:#dce3e8;border-radius:20px}
+.tw-row{display:flex;gap:10px;margin-bottom:18px;animation:messageIn .28s ease both}
+@keyframes messageIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+.tw-row.user{justify-content:flex-end}
+.tw-avatar{width:31px;height:31px;flex:0 0 31px;border-radius:10px;background:#e8f3fa;color:var(--brand);display:grid;place-items:center;font-size:10px;font-weight:900;margin-top:2px}
+.tw-bubble{max-width:min(720px,78%);font-size:14px;line-height:1.68;padding:14px 16px;border-radius:17px;background:#fff;border:1px solid #e3e9ed;box-shadow:0 5px 18px rgba(25,48,65,.045);white-space:pre-wrap}
+.tw-row.user .tw-bubble{background:linear-gradient(135deg,var(--brand),#0872bd);color:#fff;border-color:transparent;border-bottom-right-radius:5px;box-shadow:0 7px 18px rgba(10,95,159,.16)}
+.tw-row.assistant .tw-bubble{border-bottom-left-radius:5px}
+.tw-welcome{padding:17px 18px;border:1px solid #dcecf5;background:linear-gradient(135deg,#f6fbfe,#fff);border-radius:18px;margin:2px 0 24px}
+.tw-welcome b{font-family:"Plus Jakarta Sans";font-size:14px}.tw-welcome p{font-size:13px;color:#71808b;line-height:1.65;margin:7px 0 0}
+.tw-quick{padding:11px 22px 6px;display:flex;gap:8px;flex-wrap:wrap;background:#fff;border-top:1px solid var(--line)}
+.tw-chip{border:1px solid #dce4e9;background:#fff;color:#34444f;border-radius:999px;padding:9px 13px;font-family:"DM Sans";font-size:12px;font-weight:600;cursor:pointer;transition:.2s}
+.tw-chip:hover{border-color:#9cc7e4;color:var(--brand);background:#f5fbff;transform:translateY(-1px)}
+.tw-typing{display:none;padding:0 28px 10px;background:#fff;color:#7c8992;font-size:12px}
+.tw-typing.show{display:block}.tw-dots{display:inline-flex;gap:3px;margin-left:5px}.tw-dots i{width:4px;height:4px;background:#87949d;border-radius:50%;animation:dot 1s infinite}.tw-dots i:nth-child(2){animation-delay:.15s}.tw-dots i:nth-child(3){animation-delay:.3s}
+@keyframes dot{0%,70%,100%{opacity:.25;transform:translateY(0)}35%{opacity:1;transform:translateY(-2px)}}
+.tw-inputbar{display:flex;gap:10px;padding:13px 17px;background:#fff;border-top:1px solid var(--line)}
+.tw-inputwrap{flex:1;display:flex;align-items:center;border:1px solid #d5dfe5;border-radius:15px;background:#fff;padding:0 14px;transition:.2s;box-shadow:0 2px 8px rgba(20,40,55,.025)}
+.tw-inputwrap:focus-within{border-color:#8ab9d8;box-shadow:0 0 0 4px rgba(10,95,159,.07)}
+.tw-input{width:100%;border:0;outline:0;padding:13px 0;font-family:"DM Sans";font-size:14px;background:transparent;color:var(--ink)}
+.tw-input::placeholder{color:#9aa5ad}
+.tw-send{border:0;background:linear-gradient(135deg,var(--brand),#0872bd);color:#fff;border-radius:14px;width:50px;font-size:19px;font-weight:800;cursor:pointer;transition:.2s;box-shadow:0 7px 17px rgba(10,95,159,.18)}
+.tw-send:hover{transform:translateY(-1px)}.tw-send:disabled{opacity:.45;cursor:not-allowed;transform:none}
+.tw-foot{text-align:center;background:#fff;color:#8b969d;font-size:10px;padding:0 16px 14px}
+@media(max-width:760px){
+ .tw-wrap{padding:20px 12px 45px}.tw-launch{padding:30px 24px;display:block}.tw-copy h1{font-size:28px}.tw-open{margin-top:23px;width:100%}
+ .tw-body{height:650px}.tw-messages{padding:21px 15px 14px}.tw-bubble{max-width:88%}.tw-quick{padding:10px 14px 6px}.tw-inputbar{padding:10px}
+}
+</style>
+</head>
+<body>
+<div class="tw-wrap">
+ <div class="tw-card">
+  <section class="tw-panel open" id="panel" aria-hidden="false">
+   <div class="tw-panel-inner">
+    <div class="tw-head">
+     <div class="tw-brand">
+      <div class="tw-ai-icon">AI</div>
+      <div><strong>TestAllWater AI Assistant</strong><div class="tw-online"><i></i><span id="status">AI ready · Prototype</span></div></div>
+     </div>
+     <button class="tw-close" id="closeAI" aria-label="Close AI">×</button>
+    </div>
+    <div class="tw-body">
+     <div class="tw-messages" id="messages">
+      <div class="tw-welcome"><b>Hi! Let's find the right test.</b><p>Describe your water issue in your own words. No technical terms needed — I'll ask the important questions as we go.</p></div>
+     </div>
+     <div class="tw-quick"><button class="tw-chip" id="connectionTest">Test AI connection</button>
+      <button class="tw-chip">My pool water is cloudy</button>
+      <button class="tw-chip">I need to test drinking water</button>
+      <button class="tw-chip">My chlorine seems too high</button>
+      <button class="tw-chip">I need a general water test</button>
+     </div>
+     <div class="tw-typing" id="typing">AI is thinking <span class="tw-dots"><i></i><i></i><i></i></span></div>
+     <form class="tw-inputbar" id="form">
+      <div class="tw-inputwrap"><input class="tw-input" id="input" placeholder="Tell me about your water…" autocomplete="off"></div>
+      <button class="tw-send" id="send" aria-label="Send">↑</button>
+     </form>
+     <div class="tw-foot">AI assistant · Prototype testing mode · Live product catalog will be connected later</div>
+    </div>
+   </div>
+  </section>
+ </div>
+</div>
+<script>
+const panel=document.getElementById('panel'),messages=document.getElementById('messages'),input=document.getElementById('input'),send=document.getElementById('send'),typing=document.getElementById('typing'),status=document.getElementById('status');
+let busy=false,history=[];
+function addMessage(role,text){
+ const row=document.createElement('div');row.className='tw-row '+role;
+ if(role==='assistant'){const av=document.createElement('div');av.className='tw-avatar';av.textContent='AI';row.appendChild(av)}
+ const bubble=document.createElement('div');bubble.className='tw-bubble';bubble.textContent=text;row.appendChild(bubble);
+ messages.appendChild(row);requestAnimationFrame(()=>messages.scrollTop=messages.scrollHeight);
+}
+function setBusy(v){busy=v;send.disabled=v;input.disabled=v;typing.classList.toggle('show',v)}
+async function ask(text){
+ if(!text||busy)return;
+ addMessage('user',text);history.push({role:'user',content:text});setBusy(true);
+ try{
+  const controller=new AbortController();
+  const timer=setTimeout(()=>controller.abort(),58000);
+  const res=await fetch("/api/chat",{
+    method:"POST",
+    headers:{"Content-Type":"application/json","Accept":"application/json"},
+    body:JSON.stringify({messages:history.slice(-12)}),
+    signal:controller.signal
+  });
+  clearTimeout(timer);
+  const data=await res.json().catch(()=>({}));
+  if(!res.ok) throw new Error(data?.error||`Server error (${res.status})`);
+  const reply=data?.reply?.trim();
+  if(!reply) throw new Error("The AI returned an empty response.");
+  history.push({role:"assistant",content:reply});
+  addMessage("assistant",reply);}catch(e){
+  console.error("NaraRouter request failed:",e);
+  const msg=e?.name==="AbortError"
+    ?"The AI request timed out."
+    :(e?.message||"Unknown API error");
+  addMessage("assistant","AI request failed:\n"+msg+"\n\nPlease check the Vercel API function and NaraRouter environment variables.");
+}
+ setBusy(false);input.focus();
+}
+document.getElementById('closeAI').onclick=()=>{panel.classList.remove('open');panel.setAttribute('aria-hidden','true')}
+document.getElementById('form').onsubmit=e=>{e.preventDefault();const t=input.value.trim();if(t){input.value='';ask(t)}}
+document.querySelectorAll('.tw-chip').forEach(b=>{
+  if(b.id==="connectionTest") return;
+  b.onclick=()=>ask(b.textContent.trim());
+});
+document.getElementById("connectionTest").onclick=()=>ask("Connection test: Please reply with a short confirmation that you are the TestAllWater water-testing assistant.");
+status.textContent="AI ready · NaraRouter";
+</script>
+</body>
+</html>
