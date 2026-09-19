@@ -479,6 +479,11 @@ test("a JSON reply with a prose field shows just that text, whichever key the mo
     ['{"text":"via text key"}', "via text key"],
     ['{"answer":"A","message":"B"}', "B"], // fixed key priority, not object order
     ['{"message":"  ","response":"used the non-blank one"}', "used the non-blank one"],
+    ['{"question":"Is this a freshwater or saltwater aquarium?"}', "Is this a freshwater or saltwater aquarium?"],
+    // cut off before the closing brace (this exact reply leaked on the live site)
+    ['{\n  "question": "Is this a freshwater or saltwater aquarium?"', "Is this a freshwater or saltwater aquarium?"],
+    ['{"response": "Thanks, I\'ve got that. Is it freshwater?"', "Thanks, I've got that. Is it freshwater?"],
+    ['{\n  "water_type": "aquarium",\n  "message": "How big is the tank?"\n', "How big is the tank?"],
   ];
   for (const [raw, expected] of shapes) {
     logs.out.length = 0;
@@ -519,12 +524,21 @@ test("a structured JSON reply (no prose field) is shown as a readable list, not 
   assert.equal(JSON.parse(logs.out[0]).unwrappedJson, "fields");
 });
 
+test("a cut-off structured JSON reply is repaired and shown as a list", async () => {
+  mockUpstream(ok('{"water_type":"aquarium","parameters":["ammonia","nitrite"'));
+  const res = await call(HI);
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.payload.reply, "- **Water type:** aquarium\n- **Parameters:** ammonia, nitrite");
+});
+
 test("JSON that cannot be rendered is an error, never shown to the customer", async () => {
   for (const raw of [
     '{"messages":[{"role":"user","content":"My aquarium fish are gasping"}]}', // nested objects
     '{"message":"   "}', // blank
     "{}",
     '{"a":{"b":1}}',
+    '{"a": {"b": ', // cut off and unrepairable
+    '{"message":"   "', // cut off and blank
   ]) {
     logs.out.length = 0;
     logs.err.length = 0;

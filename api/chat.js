@@ -185,8 +185,12 @@ function upstreamMessage(data) {
 //   1. an object with a prose field   -> show just that text
 //   2. a flat object of plain values  -> show it as a readable bullet list
 //   3. anything else that is JSON     -> not renderable (caller reports an error)
+// It can also be cut off before the closing brace (seen live: {"question": "..." with no
+// "}"), so an unterminated object is repaired by appending the missing closers.
 // Replies that are not a JSON object are returned untouched.
-const PROSE_KEYS = ["message", "response", "reply", "answer", "assistantmessage", "assistantresponse", "text", "content"];
+const PROSE_KEYS = ["message", "response", "reply", "answer", "question", "assistantmessage", "assistantresponse", "text", "content"];
+const JSON_OBJECT_START = /^\{\s*("[^"\n]{1,60}"\s*:|\})/;
+const CLOSERS = ["}", '"}', "]}", '"]}'];
 const keyId = (key) => key.toLowerCase().replace(/[^a-z]/g, "");
 const isPlain = (v) => ["string", "number", "boolean"].includes(typeof v);
 const humanizeKey = (key) => {
@@ -194,15 +198,31 @@ const humanizeKey = (key) => {
   return words.charAt(0).toUpperCase() + words.slice(1);
 };
 
-function unwrapJsonReply(reply) {
-  if (!reply.startsWith("{") || !reply.endsWith("}")) return { text: reply };
-  let obj;
+// The parsed object; undefined when the text should be left alone (it has a "}" but is not
+// valid JSON, e.g. JSON followed by prose); null when it looks like JSON but is unusable.
+function parseJsonObject(reply) {
   try {
-    obj = JSON.parse(reply);
+    return JSON.parse(reply);
   } catch {
-    return { text: reply }; // not JSON (e.g. prose that happens to use braces)
+    // fall through
   }
-  if (!obj || typeof obj !== "object" || Array.isArray(obj)) return { text: reply };
+  if (reply.includes("}")) return undefined;
+  for (const closer of CLOSERS) {
+    try {
+      return JSON.parse(reply + closer);
+    } catch {
+      // try the next closer
+    }
+  }
+  return null;
+}
+
+function unwrapJsonReply(reply) {
+  if (!JSON_OBJECT_START.test(reply)) return { text: reply };
+  const obj = parseJsonObject(reply);
+  if (obj === undefined) return { text: reply };
+  if (obj === null) return { text: null, unwrapped: "unrenderable" };
+  if (typeof obj !== "object" || Array.isArray(obj)) return { text: reply };
 
   const keys = new Map(Object.keys(obj).map((k) => [keyId(k), k]));
   for (const id of PROSE_KEYS) {
