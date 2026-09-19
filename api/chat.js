@@ -2,18 +2,24 @@ import { randomUUID } from "node:crypto";
 
 const DEFAULT_BASE_URL = "https://router.bynara.id/v1";
 // Zero-cost model on NaraRouter's Free plan (GET https://router.bynara.id/api/plans).
-const MODEL = "nemotron-3.5-lightning-free";
+// Chosen by a live comparison of the Free-plan chat models through this exact flow
+// (2 interleaved runs, 48 requests per model): nex-n2.5-pro answered 79% of requests
+// with no hard errors; nemotron-3-super-free 60% (11 "empty reply" errors),
+// nemotron-3-ultra-free 40%, laguna-s-2.1 35%, nemotron-3.5-lightning-free 17%.
+// See "Model selection" in the README.
+const MODEL = "nex-n2.5-pro";
 
-// It is a reasoning model, but this is simple customer-support chat, so thinking is
-// disabled ("none", per NaraRouter's docs). At default depth replies took 22s to 50s+,
-// and at "low" about one in three still hit the deadline.
+// The Free-plan models are reasoning models, but this is simple customer-support chat,
+// so thinking is disabled ("none", per NaraRouter's docs): it only adds latency, and
+// every model tested worked with it.
 const REASONING_EFFORT = "none";
 
 // Each attempt (connect + headers + body) gets its own hard deadline. Live data showed
-// this free model either answers within ~12s or stalls indefinitely, so a stalled
-// attempt is abandoned early and retried once. Worst case is 2 x 9s = 18s, inside the
-// browser's 30s limit (see index.html) and maxDuration (60s, see vercel.json), so the
-// client always receives a JSON answer.
+// the free models either answer within ~12s or stall; NaraRouter also has stall
+// episodes lasting 10+ minutes that hit every model at once. A stalled attempt is
+// abandoned early and retried once. Worst case is 2 x 9s = 18s, inside the browser's
+// 30s limit (see index.html) and maxDuration (60s, see vercel.json), so the client
+// always receives a JSON answer.
 const ATTEMPT_TIMEOUT_MS = 9000;
 const MAX_ATTEMPTS = 2;
 const MAX_OUTPUT_TOKENS = 1000;
@@ -125,6 +131,20 @@ function upstreamMessage(data) {
   return (typeof found === "string" ? found : JSON.stringify(found)).slice(0, 300);
 }
 
+// nex-n2.5-pro occasionally answers with a JSON object instead of prose, e.g.
+// {"water_type":"aquarium","message":"First, are your fish freshwater or saltwater?"}
+// (seen once in ~50 replies). Show the customer just the message text.
+function unwrapJsonMessage(reply) {
+  if (!reply.startsWith("{") || !reply.endsWith("}")) return reply;
+  try {
+    const parsed = JSON.parse(reply);
+    if (typeof parsed?.message === "string" && parsed.message.trim()) return parsed.message.trim();
+  } catch {
+    // not JSON: leave the reply untouched
+  }
+  return reply;
+}
+
 // One JSON log line per request for Vercel Runtime Logs. Never includes the API
 // key or any message text; only sizes, timings and outcomes.
 function logRequest(meta) {
@@ -156,7 +176,7 @@ async function attemptOnce({ baseUrl, apiKey, messages, meta }) {
         Accept: "application/json",
       },
       body: JSON.stringify({
-        model: meta.model,
+        model: MODEL,
         messages,
         temperature: 0.35,
         max_tokens: MAX_OUTPUT_TOKENS,
@@ -220,7 +240,9 @@ async function attemptOnce({ baseUrl, apiKey, messages, meta }) {
           : "The AI returned an empty answer. Please try again."
       );
     }
-    return reply;
+    const shown = unwrapJsonMessage(reply);
+    if (shown !== reply) meta.unwrappedJson = true;
+    return shown;
   })();
 
   try {
@@ -268,7 +290,7 @@ async function callModel({ baseUrl, apiKey, messages, meta }) {
   throw lastError;
 }
 
-async function handleChat(req, res, model) {
+export default async function handler(req, res) {
   res.setHeader("Cache-Control", "no-store");
 
   if (req.method !== "POST") {
@@ -294,7 +316,7 @@ async function handleChat(req, res, model) {
   const requestId = req.headers?.["x-vercel-id"] || randomUUID();
   const meta = {
     requestId,
-    model,
+    model: MODEL,
     reasoningEffort: REASONING_EFFORT,
     historyMessages: history.length,
     startedAt: Date.now(),
@@ -305,7 +327,7 @@ async function handleChat(req, res, model) {
     meta.outcome = "ok";
     meta.replyChars = reply.length;
     logRequest(meta);
-    return res.status(200).json({ reply, model });
+    return res.status(200).json({ reply, model: MODEL });
   } catch (error) {
     meta.outcome = error.code;
     logRequest(meta);
@@ -314,8 +336,3 @@ async function handleChat(req, res, model) {
       .json({ error: error.message, code: error.code, requestId, detail: meta.errorDetail });
   }
 }
-
-// /api/chat always uses the configured MODEL. createHandler exists so tests (and the
-// model comparison) can run the identical flow with a different model.
-export const createHandler = (model) => (req, res) => handleChat(req, res, model);
-export default createHandler(MODEL);

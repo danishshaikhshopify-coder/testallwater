@@ -142,7 +142,7 @@ test("forwards the real upstream reply, server-side key, and trimmed base URL", 
 
   assert.equal(res.statusCode, 200);
   assert.equal(res.payload.reply, "Real AI answer");
-  assert.equal(res.payload.model, "nemotron-3.5-lightning-free");
+  assert.equal(res.payload.model, "nex-n2.5-pro");
   assert.equal(upstreamCalls.length, 1);
   assert.equal(upstreamCalls[0].url, "https://router.example/v1/chat/completions");
   assert.equal(upstreamCalls[0].init.headers.Authorization, "Bearer test-key");
@@ -199,12 +199,12 @@ test("accepts a JSON string body", async () => {
   assert.equal(res.statusCode, 200);
 });
 
-test("only ever calls nemotron-3.5-lightning-free, with no retry on another model", async () => {
+test("only ever calls nex-n2.5-pro, with no retry on another model", async () => {
   mockUpstream({ status: 500, body: { error: { message: "boom" } } }, ok("must never be reached"));
   const res = await call({ body: { messages: [{ role: "user", content: "hi" }] } });
 
   assert.equal(res.statusCode, 502);
-  assert.deepEqual(upstreamCalls.map((c) => c.body.model), ["nemotron-3.5-lightning-free"]);
+  assert.deepEqual(upstreamCalls.map((c) => c.body.model), ["nex-n2.5-pro"]);
 });
 
 const HI = { body: { messages: [{ role: "user", content: "hi" }] } };
@@ -298,7 +298,7 @@ test("a stalled first attempt is retried and the second attempt's reply is retur
 
   assert.equal(res.statusCode, 200);
   assert.equal(res.payload.reply, "second attempt reply");
-  assert.equal(res.payload.model, "nemotron-3.5-lightning-free");
+  assert.equal(res.payload.model, "nex-n2.5-pro");
   assert.equal(upstreamCalls.length, 2);
   // Identical request both times: same URL, key, model, effort, tokens and messages.
   assert.equal(upstreamCalls[1].url, upstreamCalls[0].url);
@@ -430,7 +430,7 @@ test("logs one structured line per request, without the key or message text", as
   const entry = JSON.parse(logs.out[0]);
   assert.equal(entry.event, "chat");
   assert.equal(entry.outcome, "ok");
-  assert.equal(entry.model, "nemotron-3.5-lightning-free");
+  assert.equal(entry.model, "nex-n2.5-pro");
   assert.equal(entry.reasoningEffort, CONFIGURED_EFFORT);
   assert.equal(entry.upstreamStatus, 200);
   assert.equal(entry.finishReason, "stop");
@@ -465,24 +465,32 @@ test("uses Vercel's request id for log correlation when present", async () => {
   assert.equal(JSON.parse(logs.out[0]).requestId, "bom1::abc");
 });
 
-test("createHandler runs the identical flow with another model; the default export stays on the configured one", async () => {
-  const { createHandler } = await import("../api/chat.js");
-  const run = async (h) => {
-    const res = { headers: {}, setHeader() {}, status(c) { this.statusCode = c; return this; }, json(p) { this.payload = p; return this; } };
-    await h({ method: "POST", body: HI.body }, res);
-    return res;
-  };
+test("unwraps a JSON-object reply (seen from nex-n2.5-pro) to just its message text", async () => {
+  mockUpstream(ok('{"water_type":"aquarium","message":"First, are your fish freshwater or saltwater?"}'));
+  const res = await call(HI);
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.payload.reply, "First, are your fish freshwater or saltwater?");
+  assert.equal(JSON.parse(logs.out[0]).unwrappedJson, true);
+});
 
-  mockUpstream(ok("from other model"));
-  const other = await run(createHandler("laguna-s-2.1"));
-  assert.equal(other.payload.model, "laguna-s-2.1");
-  assert.equal(upstreamCalls[0].body.model, "laguna-s-2.1");
-  assert.equal(upstreamCalls[0].body.reasoning_effort, CONFIGURED_EFFORT);
-  assert.equal(upstreamCalls[0].body.max_tokens, 1000);
-
-  mockUpstream(ok("default"));
-  await call(HI); // the default export
-  assert.equal(upstreamCalls[0].body.model, "nemotron-3.5-lightning-free");
+test("leaves every other reply untouched (prose, JSON without a usable message, stray braces)", async () => {
+  const untouched = [
+    "Plain answer",
+    "**Test** chlorine and pH.\n\n- Free chlorine\n- pH",
+    '{"water_type":"aquarium"}',
+    '{"message": 42}',
+    '{"message": "   "}',
+    "{not json}",
+    "Use {braces} carefully",
+    'Prefix {"message":"x"}',
+  ];
+  for (const text of untouched) {
+    logs.out.length = 0;
+    mockUpstream(ok(text));
+    const res = await call(HI);
+    assert.equal(res.payload.reply, text, `changed: ${text}`);
+    assert.equal(JSON.parse(logs.out[0]).unwrappedJson, undefined);
+  }
 });
 
 test("caps output at 1000 tokens", async () => {

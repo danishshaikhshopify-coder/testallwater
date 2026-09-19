@@ -8,7 +8,7 @@ Browser (index.html)  ──POST /api/chat──▶  Vercel function (api/chat.j
 ```
 
 - **Frontend** – `index.html`, a single static page. Every message is sent to `/api/chat` and the reply shown is the real model response. There is no demo or canned-reply fallback: if the request fails, the error is shown.
-- **Backend** – `api/chat.js`, a Vercel serverless function. It adds the system prompt, calls NaraRouter's OpenAI-compatible API with the `nemotron-3.5-lightning-free` model only (no fallback model). It is a zero-cost model on NaraRouter's Free plan; `deepseek-v4-flash` is not used because it requires a paid plan. Check the current list at `https://router.bynara.id/api/plans` before changing the model.
+- **Backend** – `api/chat.js`, a Vercel serverless function. It adds the system prompt, calls NaraRouter's OpenAI-compatible API with the `nex-n2.5-pro` model only (no fallback model). It is a zero-cost model on NaraRouter's Free plan; `deepseek-v4-flash` is not used because it requires a paid plan. Check the current list at `https://router.bynara.id/api/plans` before changing the model, and see [Model selection](#model-selection) for how this one was chosen.
 - **Conversation context** – the browser keeps the conversation and sends the last 12 turns with each request; the server forwards them to the model after the system prompt.
 
 ## Security
@@ -16,6 +16,23 @@ Browser (index.html)  ──POST /api/chat──▶  Vercel function (api/chat.j
 - `NARA_ROUTER_API_KEY` exists only as a Vercel environment variable and is only read inside `api/chat.js`. It never appears in `index.html` or any client-side code.
 - The system prompt is server-side. Any `system` message sent by a client is discarded, so the endpoint cannot be repurposed as a general-purpose LLM proxy. History length (12 turns) and message size (4,000 chars) are capped.
 - The endpoint has no rate limiting. If abuse becomes a concern, add one (e.g. Vercel WAF rate-limit rule or Upstash Ratelimit).
+
+## Model selection
+
+The Free-plan chat models were compared on the live deployment through the exact production flow (server prompt, `reasoning_effort: "none"`, 1000 tokens, 2 x 9s attempts). Requests were interleaved model-by-model with identical prompts (six realistic customer messages, one of them multi-turn) so every model saw the same upstream conditions. 48 requests per model over two runs:
+
+| Model | Answered | 95% CI | Timeouts | Hard errors | Median reply time | p90 |
+| --- | --- | --- | --- | --- | --- | --- |
+| **`nex-n2.5-pro`** (chosen) | **38/48 (79%)** | 66-88% | 10 | 0 | 7.4s | 15.5s |
+| `nemotron-3-super-free` | 29/48 (60%) | 46-73% | 8 | 11 (empty reply) | 5.2s | 7.7s |
+| `nemotron-3-ultra-free` | 19/48 (40%) | 27-54% | 23 | 6 | 13.8s | 17.3s |
+| `laguna-s-2.1` | 17/48 (35%) | 23-50% | 24 | 7 | 8.9s | 18.1s |
+| `nemotron-3.5-lightning-free` (previous) | 8/48 (17%) | 9-30% | 40 | 0 | 13.7s | 18.0s |
+
+Caveats:
+- NaraRouter has stall episodes lasting 10+ minutes in which **every** model times out at once (in the second run, 7 of 60 requests succeeded across all five models during one). Model choice cannot fix that; only same-window comparisons like the above are meaningful, and results will drift as NaraRouter's capacity changes.
+- `nex-n2.5-pro` once answered with a raw JSON object (`{"water_type": ..., "message": ...}`) in about 50 replies read; `api/chat.js` unwraps such a reply to its `message` text.
+- `nemotron-3-super-free` was the fastest when it worked, but about a quarter of its requests came back empty.
 
 ## Reliability and debugging
 
