@@ -9,7 +9,7 @@ const MODEL = "nemotron-3.5-lightning-free";
 // one in three still hit the deadline. NOTE: "none" (documented as "off") made
 // NaraRouter's origin fail every request for this model with a Cloudflare 502
 // ("origin returned an invalid or incomplete response") within ~1.5s, so it is not used.
-const REASONING_EFFORT = "minimal";
+const REASONING_EFFORT = "low";
 
 // The whole upstream exchange (connect + headers + body) gets one hard deadline. It
 // must finish before the browser gives up (30s, see index.html) and well inside
