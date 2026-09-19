@@ -202,10 +202,10 @@ test("explains an empty reply caused by the token limit", async () => {
   assert.match(res.payload.error, /ran out of tokens/);
 });
 
-test("asks NaraRouter for low reasoning effort", async () => {
+test("disables reasoning with reasoning_effort none", async () => {
   mockUpstream(ok("ok"));
   await call(HI);
-  assert.equal(upstreamCalls[0].body.reasoning_effort, "low");
+  assert.equal(upstreamCalls[0].body.reasoning_effort, "none");
 });
 
 test("maps a NaraRouter 429 to a friendly 429", async () => {
@@ -225,23 +225,39 @@ test("an unreadable 200 response is a bad_response error, not an empty reply", a
 
 test("times out with a JSON 504 when the upstream body stalls (was: bogus 'empty response')", async () => {
   mockStalledBody();
-  const res = await callWithClockAdvance(45000, HI);
+  const res = await callWithClockAdvance(20000, HI);
   assert.equal(res.statusCode, 504);
   assert.equal(res.payload.code, "timeout");
-  assert.match(res.payload.error, /took too long/);
+  assert.match(res.payload.error, /took too long to respond \(over 20s\)\. Please try again\./);
   assert.equal(res.payload.reply, undefined);
+});
+
+test("the 20s deadline fires at exactly 20s, not before", async () => {
+  mockStalledBody();
+  mock.timers.enable({ apis: ["setTimeout"] });
+  let settled = false;
+  const pending = call(HI).then((res) => ((settled = true), res));
+
+  mock.timers.tick(19999);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(settled, false, "must still be waiting at 19.999s");
+
+  mock.timers.tick(1);
+  const res = await pending;
+  assert.equal(res.statusCode, 504);
+  assert.equal(res.payload.code, "timeout");
 });
 
 test("times out with a JSON 504 even if the connection never answers or honours abort", async () => {
   mockDeadSocket();
-  const res = await callWithClockAdvance(45000, HI);
+  const res = await callWithClockAdvance(20000, HI);
   assert.equal(res.statusCode, 504);
   assert.equal(res.payload.code, "timeout");
 });
 
 test("does not time out before the deadline", async () => {
   mockUpstream(ok("fast enough"));
-  const res = await callWithClockAdvance(44000, HI);
+  const res = await callWithClockAdvance(19000, HI);
   assert.equal(res.statusCode, 200);
 });
 
@@ -260,7 +276,7 @@ test("logs one structured line per request, without the key or message text", as
   assert.equal(entry.event, "chat");
   assert.equal(entry.outcome, "ok");
   assert.equal(entry.model, "nemotron-3.5-lightning-free");
-  assert.equal(entry.reasoningEffort, "low");
+  assert.equal(entry.reasoningEffort, "none");
   assert.equal(entry.upstreamStatus, 200);
   assert.equal(entry.finishReason, "stop");
   assert.equal(entry.reasoningTokens, 20);
@@ -273,7 +289,7 @@ test("logs one structured line per request, without the key or message text", as
 
 test("logs failures at error level with the outcome and timings", async () => {
   mockStalledBody();
-  await callWithClockAdvance(45000, HI);
+  await callWithClockAdvance(20000, HI);
 
   assert.equal(logs.out.length, 0);
   assert.equal(logs.err.length, 1);
@@ -292,10 +308,10 @@ test("uses Vercel's request id for log correlation when present", async () => {
   assert.equal(JSON.parse(logs.out[0]).requestId, "bom1::abc");
 });
 
-test("gives the reasoning model enough output tokens", async () => {
+test("caps output at 1000 tokens", async () => {
   mockUpstream(ok("ok"));
-  await call({ body: { messages: [{ role: "user", content: "hi" }] } });
-  assert.ok(upstreamCalls[0].body.max_tokens >= 1500);
+  await call(HI);
+  assert.equal(upstreamCalls[0].body.max_tokens, 1000);
 });
 
 test("API code references only the chosen model, not the removed ones", () => {
@@ -318,6 +334,17 @@ test("index.html clears the thinking state and abort timer in a finally block", 
   assert.match(askFn, /finally\s*\{[^}]*clearTimeout\(timer\)[^}]*setBusy\(false\)/);
   // The timer must not be cleared before the body has been read.
   assert.ok(askFn.indexOf("clearTimeout(timer)") > askFn.indexOf("res.json()"));
+});
+
+test("the browser's safety timer outlasts the backend deadline, which fits maxDuration", () => {
+  const html = readFileSync(new URL("index.html", root), "utf8");
+  const api = readFileSync(new URL("api/chat.js", root), "utf8");
+  const vercel = JSON.parse(readFileSync(new URL("vercel.json", root), "utf8"));
+  const browserMs = Number(/controller\.abort\(\),(\d+)\)/.exec(html)[1]);
+  const backendMs = Number(/const MODEL_TIMEOUT_MS = (\d+)/.exec(api)[1]);
+  assert.equal(backendMs, 20000);
+  assert.ok(browserMs > backendMs, `browser ${browserMs}ms must exceed backend ${backendMs}ms`);
+  assert.ok(browserMs < vercel.functions["api/chat.js"].maxDuration * 1000);
 });
 
 test("index.html always calls /api/chat and has no key, system prompt, or demo fallback", () => {

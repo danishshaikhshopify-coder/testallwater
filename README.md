@@ -19,11 +19,11 @@ Browser (index.html)  ──POST /api/chat──▶  Vercel function (api/chat.j
 
 ## Reliability and debugging
 
-- The model is called with `reasoning_effort: "low"` (NaraRouter's recommended level for everyday chat). At its default depth the free reasoning model took 22s to 50s+ per reply.
-- The whole upstream exchange has one hard 45s deadline. On timeout the API returns a JSON `504`, so the browser always gets an answer and the "thinking" indicator always clears. The browser has its own 58s limit as a second safety net.
+- The model is called with `reasoning_effort: "none"` and `max_tokens: 1000`. It is a reasoning model, but this is simple customer-support chat: at its default depth the free model took 22s to 50s+ per reply, and at `"low"` about one request in three still hit the deadline.
+- The whole upstream exchange has one hard 20s deadline. On timeout the API returns a JSON `504` ("The AI took too long to respond (over 20s)"), so the browser always gets an answer and the "thinking" indicator always clears. The browser has its own 30s limit as a second safety net.
 - Error responses are JSON: `{ "error": "<friendly message>", "code": "...", "requestId": "..." }` with codes `timeout` (504), `rate_limited` (429), `upstream_error`, `unreachable`, `bad_response`, `empty_reply` (502).
 - Every request writes one JSON log line to **Vercel → Project → Logs** (`"event":"chat"`): `outcome`, `upstreamStatus`, `headersMs`, `bodyMs`, `totalMs`, `finishReason`, token counts (`reasoningTokens` shows how much time was spent thinking), and `requestId` (the `x-vercel-id`). Failures are logged at error level. Logs contain no API key and no message text.
-- If replies are still too slow, set `REASONING_EFFORT` in `api/chat.js` to `"none"`.
+- If replies are still slower than the 20s deadline, look at `headersMs`/`totalMs` in the logs; the remaining lever is a different free model from `https://router.bynara.id/api/plans`.
 
 ## Deploy on Vercel
 

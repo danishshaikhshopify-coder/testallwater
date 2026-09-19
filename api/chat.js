@@ -4,16 +4,16 @@ const DEFAULT_BASE_URL = "https://router.bynara.id/v1";
 // Zero-cost model on NaraRouter's Free plan (GET https://router.bynara.id/api/plans).
 const MODEL = "nemotron-3.5-lightning-free";
 
-// It is a reasoning model. NaraRouter's docs recommend "low" for everyday chat and
-// simple Q&A ("none" disables thinking); the default depth took 22s to 50s+ per reply.
-const REASONING_EFFORT = "low";
+// It is a reasoning model, but this is simple customer-support chat, so thinking is
+// disabled ("none", per NaraRouter's docs). At default depth replies took 22s to 50s+,
+// and at "low" they still hit the deadline about one time in three.
+const REASONING_EFFORT = "none";
 
 // The whole upstream exchange (connect + headers + body) gets one hard deadline. It
-// must finish inside maxDuration (60s, see vercel.json) and before the browser gives
-// up (58s, see index.html), so the client always receives a JSON answer.
-const MODEL_TIMEOUT_MS = 45000;
-// Reasoning tokens count toward max_tokens; too low a cap leaves no room for the answer.
-const MAX_OUTPUT_TOKENS = 2000;
+// must finish before the browser gives up (30s, see index.html) and well inside
+// maxDuration (60s, see vercel.json), so the client always receives a JSON answer.
+const MODEL_TIMEOUT_MS = 20000;
+const MAX_OUTPUT_TOKENS = 1000;
 const MAX_HISTORY_MESSAGES = 12;
 const MAX_MESSAGE_CHARS = 4000;
 
