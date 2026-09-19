@@ -15,7 +15,7 @@ const REASONING_EFFORT = "low";
 // must finish before the browser gives up (30s, see index.html) and well inside
 // maxDuration (60s, see vercel.json), so the client always receives a JSON answer.
 const MODEL_TIMEOUT_MS = 20000;
-const MAX_OUTPUT_TOKENS = 1000;
+const MAX_OUTPUT_TOKENS = 2000;
 const MAX_HISTORY_MESSAGES = 12;
 const MAX_MESSAGE_CHARS = 4000;
 

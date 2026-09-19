@@ -341,10 +341,10 @@ test("uses Vercel's request id for log correlation when present", async () => {
   assert.equal(JSON.parse(logs.out[0]).requestId, "bom1::abc");
 });
 
-test("caps output at 1000 tokens", async () => {
+test("caps output at 2000 tokens (EXPERIMENT)", async () => {
   mockUpstream(ok("ok"));
   await call(HI);
-  assert.equal(upstreamCalls[0].body.max_tokens, 1000);
+  assert.equal(upstreamCalls[0].body.max_tokens, 2000);
 });
 
 test("API code references only the chosen model, not the removed ones", () => {
