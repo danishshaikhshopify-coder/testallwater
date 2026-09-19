@@ -73,7 +73,7 @@ test("forwards the real upstream reply, server-side key, and trimmed base URL", 
 
   assert.equal(res.statusCode, 200);
   assert.equal(res.payload.reply, "Real AI answer");
-  assert.equal(res.payload.model, "deepseek-v4-flash");
+  assert.equal(res.payload.model, "nemotron-3.5-lightning-free");
   assert.equal(upstreamCalls.length, 1);
   assert.equal(upstreamCalls[0].url, "https://router.example/v1/chat/completions");
   assert.equal(upstreamCalls[0].init.headers.Authorization, "Bearer test-key");
@@ -130,33 +130,56 @@ test("accepts a JSON string body", async () => {
   assert.equal(res.statusCode, 200);
 });
 
-test("only ever calls deepseek-v4-flash, with no retry on another model", async () => {
+test("only ever calls nemotron-3.5-lightning-free, with no retry on another model", async () => {
   mockUpstream({ status: 500, body: { error: { message: "boom" } } }, ok("must never be reached"));
   const res = await call({ body: { messages: [{ role: "user", content: "hi" }] } });
 
   assert.equal(res.statusCode, 502);
-  assert.deepEqual(upstreamCalls.map((c) => c.body.model), ["deepseek-v4-flash"]);
+  assert.deepEqual(upstreamCalls.map((c) => c.body.model), ["nemotron-3.5-lightning-free"]);
 });
 
 test("returns 502 with the upstream error and no canned reply when the model fails", async () => {
   mockUpstream({ status: 404, body: { error: { message: "model not found" } } });
   let res = await call({ body: { messages: [{ role: "user", content: "hi" }] } });
   assert.equal(res.statusCode, 502);
-  assert.equal(res.payload.error, "deepseek-v4-flash: model not found");
+  assert.equal(res.payload.error, "nemotron-3.5-lightning-free: model not found");
   assert.equal(res.payload.reply, undefined);
 
   mockUpstream(new Error("network down"));
   res = await call({ body: { messages: [{ role: "user", content: "hi" }] } });
   assert.equal(res.statusCode, 502);
-  assert.equal(res.payload.error, "deepseek-v4-flash: network down");
+  assert.equal(res.payload.error, "nemotron-3.5-lightning-free: network down");
 
   mockUpstream({ status: 200, body: { choices: [{ message: { content: "" } }] } });
   res = await call({ body: { messages: [{ role: "user", content: "hi" }] } });
-  assert.equal(res.payload.error, "deepseek-v4-flash: empty response");
+  assert.equal(res.payload.error, "nemotron-3.5-lightning-free: empty response");
 });
 
-test("auto/bynara is not referenced in the API code", () => {
-  assert.doesNotMatch(readFileSync(new URL("api/chat.js", root), "utf8"), /auto\/bynara/);
+test("explains an empty reply caused by the token limit", async () => {
+  mockUpstream({ body: { choices: [{ message: { content: null }, finish_reason: "length" }] } });
+  const res = await call({ body: { messages: [{ role: "user", content: "hi" }] } });
+  assert.equal(res.statusCode, 502);
+  assert.match(res.payload.error, /token limit reached/);
+});
+
+test("gives the reasoning model enough output tokens", async () => {
+  mockUpstream(ok("ok"));
+  await call({ body: { messages: [{ role: "user", content: "hi" }] } });
+  assert.ok(upstreamCalls[0].body.max_tokens >= 1500);
+});
+
+test("API code references only the chosen model, not the removed ones", () => {
+  const src = readFileSync(new URL("api/chat.js", root), "utf8");
+  assert.doesNotMatch(src, /auto\/bynara|deepseek/);
+});
+
+// Opt-in (needs internet): CHECK_LIVE_MODELS=1 npm test
+// Confirms the model is still offered on NaraRouter's public Free plan.
+test("model is on NaraRouter's live Free plan", { skip: !process.env.CHECK_LIVE_MODELS }, async () => {
+  const model = /const MODEL = "([^"]+)"/.exec(readFileSync(new URL("api/chat.js", root), "utf8"))[1];
+  const plans = await (await realFetch("https://router.bynara.id/api/plans")).json();
+  const free = plans.data.find((p) => p.code === "free");
+  assert.ok(free.models.includes(model), `${model} is not on the Free plan: ${free.models.join(", ")}`);
 });
 
 test("index.html always calls /api/chat and has no key, system prompt, or demo fallback", () => {

@@ -8,7 +8,7 @@ Browser (index.html)  ──POST /api/chat──▶  Vercel function (api/chat.j
 ```
 
 - **Frontend** – `index.html`, a single static page. Every message is sent to `/api/chat` and the reply shown is the real model response. There is no demo or canned-reply fallback: if the request fails, the error is shown.
-- **Backend** – `api/chat.js`, a Vercel serverless function. It adds the system prompt, calls NaraRouter's OpenAI-compatible API with the `deepseek-v4-flash` model only (no fallback model).
+- **Backend** – `api/chat.js`, a Vercel serverless function. It adds the system prompt, calls NaraRouter's OpenAI-compatible API with the `nemotron-3.5-lightning-free` model only (no fallback model). It is a zero-cost model on NaraRouter's Free plan; `deepseek-v4-flash` is not used because it requires a paid plan. Check the current list at `https://router.bynara.id/api/plans` before changing the model.
 - **Conversation context** – the browser keeps the conversation and sends the last 12 turns with each request; the server forwards them to the model after the system prompt.
 
 ## Security

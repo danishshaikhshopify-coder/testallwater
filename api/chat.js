@@ -1,9 +1,13 @@
 const DEFAULT_BASE_URL = "https://router.bynara.id/v1";
-const MODEL = "deepseek-v4-flash";
+// Zero-cost model on NaraRouter's Free plan (GET https://router.bynara.id/api/plans).
+// It is a reasoning model, so it gets extra token and time headroom below.
+const MODEL = "nemotron-3.5-lightning-free";
 
 // Must finish inside maxDuration (60s, see vercel.json) and before the browser
 // gives up (58s, see index.html).
-const MODEL_TIMEOUT_MS = 25000;
+const MODEL_TIMEOUT_MS = 50000;
+// Reasoning tokens count toward max_tokens; too low a cap leaves no room for the answer.
+const MAX_OUTPUT_TOKENS = 2000;
 const MAX_HISTORY_MESSAGES = 12;
 const MAX_MESSAGE_CHARS = 4000;
 
@@ -91,7 +95,7 @@ async function callModel({ baseUrl, apiKey, model, messages }) {
         "Content-Type": "application/json",
         Accept: "application/json",
       },
-      body: JSON.stringify({ model, messages, temperature: 0.35, max_tokens: 500 }),
+      body: JSON.stringify({ model, messages, temperature: 0.35, max_tokens: MAX_OUTPUT_TOKENS }),
       signal: controller.signal,
     });
 
@@ -103,8 +107,15 @@ async function callModel({ baseUrl, apiKey, model, messages }) {
       );
     }
 
-    const reply = data?.choices?.[0]?.message?.content?.trim();
-    if (!reply) throw new Error("empty response");
+    const choice = data?.choices?.[0];
+    const reply = choice?.message?.content?.trim();
+    if (!reply) {
+      throw new Error(
+        choice?.finish_reason === "length"
+          ? "empty response (token limit reached before the answer)"
+          : "empty response"
+      );
+    }
     return reply;
   } catch (error) {
     throw new Error(
