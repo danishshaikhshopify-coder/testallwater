@@ -17,6 +17,14 @@ Browser (index.html)  ──POST /api/chat──▶  Vercel function (api/chat.j
 - The system prompt is server-side. Any `system` message sent by a client is discarded, so the endpoint cannot be repurposed as a general-purpose LLM proxy. History length (12 turns) and message size (4,000 chars) are capped.
 - The endpoint has no rate limiting. If abuse becomes a concern, add one (e.g. Vercel WAF rate-limit rule or Upstash Ratelimit).
 
+## Reliability and debugging
+
+- The model is called with `reasoning_effort: "low"` (NaraRouter's recommended level for everyday chat). At its default depth the free reasoning model took 22s to 50s+ per reply.
+- The whole upstream exchange has one hard 45s deadline. On timeout the API returns a JSON `504`, so the browser always gets an answer and the "thinking" indicator always clears. The browser has its own 58s limit as a second safety net.
+- Error responses are JSON: `{ "error": "<friendly message>", "code": "...", "requestId": "..." }` with codes `timeout` (504), `rate_limited` (429), `upstream_error`, `unreachable`, `bad_response`, `empty_reply` (502).
+- Every request writes one JSON log line to **Vercel → Project → Logs** (`"event":"chat"`): `outcome`, `upstreamStatus`, `headersMs`, `bodyMs`, `totalMs`, `finishReason`, token counts (`reasoningTokens` shows how much time was spent thinking), and `requestId` (the `x-vercel-id`). Failures are logged at error level. Logs contain no API key and no message text.
+- If replies are still too slow, set `REASONING_EFFORT` in `api/chat.js` to `"none"`.
+
 ## Deploy on Vercel
 
 1. Import this GitHub repo in Vercel (framework preset: **Other**; no build command, no output directory).

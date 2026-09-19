@@ -1,4 +1,4 @@
-import { test, beforeEach, afterEach } from "node:test";
+import { test, beforeEach, afterEach, mock } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
 import handler from "../api/chat.js";
@@ -38,14 +38,50 @@ function call({ method = "POST", body } = {}) {
   return handler({ method, body }, res).then(() => res);
 }
 
+let logs;
+
 beforeEach(() => {
   process.env.NARA_ROUTER_API_KEY = "test-key";
   process.env.NARA_ROUTER_BASE_URL = "https://router.example/v1/";
+  logs = { out: [], err: [] };
+  mock.method(console, "log", (line) => logs.out.push(line));
+  mock.method(console, "error", (line) => logs.err.push(line));
 });
 
 afterEach(() => {
   globalThis.fetch = realFetch;
+  mock.timers.reset();
+  mock.restoreAll();
 });
+
+// Upstream sends headers, then never finishes the body (until aborted).
+function mockStalledBody() {
+  upstreamCalls = [];
+  globalThis.fetch = async (url, init) => {
+    upstreamCalls.push({ url, init, body: JSON.parse(init.body) });
+    const body = new ReadableStream({
+      start(controller) {
+        init.signal.addEventListener("abort", () =>
+          controller.error(new DOMException("aborted", "AbortError"))
+        );
+      },
+    });
+    return new Response(body, { status: 200 });
+  };
+}
+
+// Upstream never answers and ignores the abort signal entirely.
+function mockDeadSocket() {
+  upstreamCalls = [];
+  globalThis.fetch = () => new Promise(() => {});
+}
+
+async function callWithClockAdvance(ms, options) {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  const pending = call(options);
+  mock.timers.tick(ms);
+  return pending;
+}
 
 test("rejects non-POST requests", async () => {
   const res = await call({ method: "GET" });
@@ -138,28 +174,122 @@ test("only ever calls nemotron-3.5-lightning-free, with no retry on another mode
   assert.deepEqual(upstreamCalls.map((c) => c.body.model), ["nemotron-3.5-lightning-free"]);
 });
 
-test("returns 502 with the upstream error and no canned reply when the model fails", async () => {
-  mockUpstream({ status: 404, body: { error: { message: "model not found" } } });
-  let res = await call({ body: { messages: [{ role: "user", content: "hi" }] } });
+const HI = { body: { messages: [{ role: "user", content: "hi" }] } };
+
+test("returns a JSON error with the upstream message and no canned reply when the model fails", async () => {
+  mockUpstream({ status: 404, body: { error: { message: "model not found", request_id: "req-1" } } });
+  let res = await call(HI);
   assert.equal(res.statusCode, 502);
-  assert.equal(res.payload.error, "nemotron-3.5-lightning-free: model not found");
+  assert.equal(res.payload.code, "upstream_error");
+  assert.match(res.payload.error, /HTTP 404.*model not found/);
   assert.equal(res.payload.reply, undefined);
 
   mockUpstream(new Error("network down"));
-  res = await call({ body: { messages: [{ role: "user", content: "hi" }] } });
+  res = await call(HI);
   assert.equal(res.statusCode, 502);
-  assert.equal(res.payload.error, "nemotron-3.5-lightning-free: network down");
+  assert.equal(res.payload.code, "unreachable");
 
-  mockUpstream({ status: 200, body: { choices: [{ message: { content: "" } }] } });
-  res = await call({ body: { messages: [{ role: "user", content: "hi" }] } });
-  assert.equal(res.payload.error, "nemotron-3.5-lightning-free: empty response");
+  mockUpstream({ status: 200, body: { choices: [{ message: { content: "" }, finish_reason: "stop" }] } });
+  res = await call(HI);
+  assert.equal(res.statusCode, 502);
+  assert.equal(res.payload.code, "empty_reply");
 });
 
 test("explains an empty reply caused by the token limit", async () => {
   mockUpstream({ body: { choices: [{ message: { content: null }, finish_reason: "length" }] } });
-  const res = await call({ body: { messages: [{ role: "user", content: "hi" }] } });
+  const res = await call(HI);
   assert.equal(res.statusCode, 502);
-  assert.match(res.payload.error, /token limit reached/);
+  assert.match(res.payload.error, /ran out of tokens/);
+});
+
+test("asks NaraRouter for low reasoning effort", async () => {
+  mockUpstream(ok("ok"));
+  await call(HI);
+  assert.equal(upstreamCalls[0].body.reasoning_effort, "low");
+});
+
+test("maps a NaraRouter 429 to a friendly 429", async () => {
+  mockUpstream({ status: 429, body: { error: { type: "rate_limited", message: "too many" } } });
+  const res = await call(HI);
+  assert.equal(res.statusCode, 429);
+  assert.equal(res.payload.code, "rate_limited");
+});
+
+test("an unreadable 200 response is a bad_response error, not an empty reply", async () => {
+  upstreamCalls = [];
+  globalThis.fetch = async () => new Response("data: {not json}\n\n", { status: 200 });
+  const res = await call(HI);
+  assert.equal(res.statusCode, 502);
+  assert.equal(res.payload.code, "bad_response");
+});
+
+test("times out with a JSON 504 when the upstream body stalls (was: bogus 'empty response')", async () => {
+  mockStalledBody();
+  const res = await callWithClockAdvance(45000, HI);
+  assert.equal(res.statusCode, 504);
+  assert.equal(res.payload.code, "timeout");
+  assert.match(res.payload.error, /took too long/);
+  assert.equal(res.payload.reply, undefined);
+});
+
+test("times out with a JSON 504 even if the connection never answers or honours abort", async () => {
+  mockDeadSocket();
+  const res = await callWithClockAdvance(45000, HI);
+  assert.equal(res.statusCode, 504);
+  assert.equal(res.payload.code, "timeout");
+});
+
+test("does not time out before the deadline", async () => {
+  mockUpstream(ok("fast enough"));
+  const res = await callWithClockAdvance(44000, HI);
+  assert.equal(res.statusCode, 200);
+});
+
+test("logs one structured line per request, without the key or message text", async () => {
+  mockUpstream({
+    body: {
+      choices: [{ message: { content: "answer", reasoning_content: "thinking" }, finish_reason: "stop" }],
+      usage: { prompt_tokens: 10, completion_tokens: 30, completion_tokens_details: { reasoning_tokens: 20 } },
+    },
+  });
+  await call({ body: { messages: [{ role: "user", content: "my very private pool question" }] } });
+
+  assert.equal(logs.out.length, 1);
+  assert.equal(logs.err.length, 0);
+  const entry = JSON.parse(logs.out[0]);
+  assert.equal(entry.event, "chat");
+  assert.equal(entry.outcome, "ok");
+  assert.equal(entry.model, "nemotron-3.5-lightning-free");
+  assert.equal(entry.reasoningEffort, "low");
+  assert.equal(entry.upstreamStatus, 200);
+  assert.equal(entry.finishReason, "stop");
+  assert.equal(entry.reasoningTokens, 20);
+  assert.equal(entry.hadReasoning, true);
+  assert.equal(entry.replyChars, 6);
+  assert.equal(typeof entry.totalMs, "number");
+  assert.ok(entry.requestId);
+  assert.doesNotMatch(logs.out[0], /test-key|private pool question|answer/);
+});
+
+test("logs failures at error level with the outcome and timings", async () => {
+  mockStalledBody();
+  await callWithClockAdvance(45000, HI);
+
+  assert.equal(logs.out.length, 0);
+  assert.equal(logs.err.length, 1);
+  const entry = JSON.parse(logs.err[0]);
+  assert.equal(entry.outcome, "timeout");
+  assert.equal(entry.upstreamStatus, 200);
+  assert.equal(typeof entry.headersMs, "number");
+  assert.equal(entry.bodyMs, undefined);
+  assert.doesNotMatch(logs.err[0], /test-key/);
+});
+
+test("uses Vercel's request id for log correlation when present", async () => {
+  mockUpstream(ok("ok"));
+  const res = { headers: {}, setHeader() {}, status(c) { this.statusCode = c; return this; }, json(p) { this.payload = p; return this; } };
+  await handler({ method: "POST", headers: { "x-vercel-id": "bom1::abc" }, body: HI.body }, res);
+  assert.equal(JSON.parse(logs.out[0]).requestId, "bom1::abc");
 });
 
 test("gives the reasoning model enough output tokens", async () => {
@@ -180,6 +310,14 @@ test("model is on NaraRouter's live Free plan", { skip: !process.env.CHECK_LIVE_
   const plans = await (await realFetch("https://router.bynara.id/api/plans")).json();
   const free = plans.data.find((p) => p.code === "free");
   assert.ok(free.models.includes(model), `${model} is not on the Free plan: ${free.models.join(", ")}`);
+});
+
+test("index.html clears the thinking state and abort timer in a finally block", () => {
+  const html = readFileSync(new URL("index.html", root), "utf8");
+  const askFn = html.slice(html.indexOf("async function ask"), html.indexOf("document.getElementById('closeAI')"));
+  assert.match(askFn, /finally\s*\{[^}]*clearTimeout\(timer\)[^}]*setBusy\(false\)/);
+  // The timer must not be cleared before the body has been read.
+  assert.ok(askFn.indexOf("clearTimeout(timer)") > askFn.indexOf("res.json()"));
 });
 
 test("index.html always calls /api/chat and has no key, system prompt, or demo fallback", () => {

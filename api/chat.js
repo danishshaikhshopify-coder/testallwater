@@ -1,11 +1,17 @@
+import { randomUUID } from "node:crypto";
+
 const DEFAULT_BASE_URL = "https://router.bynara.id/v1";
 // Zero-cost model on NaraRouter's Free plan (GET https://router.bynara.id/api/plans).
-// It is a reasoning model, so it gets extra token and time headroom below.
 const MODEL = "nemotron-3.5-lightning-free";
 
-// Must finish inside maxDuration (60s, see vercel.json) and before the browser
-// gives up (58s, see index.html).
-const MODEL_TIMEOUT_MS = 50000;
+// It is a reasoning model. NaraRouter's docs recommend "low" for everyday chat and
+// simple Q&A ("none" disables thinking); the default depth took 22s to 50s+ per reply.
+const REASONING_EFFORT = "low";
+
+// The whole upstream exchange (connect + headers + body) gets one hard deadline. It
+// must finish inside maxDuration (60s, see vercel.json) and before the browser gives
+// up (58s, see index.html), so the client always receives a JSON answer.
+const MODEL_TIMEOUT_MS = 45000;
 // Reasoning tokens count toward max_tokens; too low a cap leaves no room for the answer.
 const MAX_OUTPUT_TOKENS = 2000;
 const MAX_HISTORY_MESSAGES = 12;
@@ -84,10 +90,52 @@ function sanitizeHistory(incoming) {
     .slice(-MAX_HISTORY_MESSAGES);
 }
 
-async function callModel({ baseUrl, apiKey, model, messages }) {
+// An error that maps to a specific HTTP status and a message that is safe to show
+// to customers.
+class ChatError extends Error {
+  constructor(code, status, message) {
+    super(message);
+    this.code = code;
+    this.status = status;
+  }
+}
+
+const timeoutError = () =>
+  new ChatError(
+    "timeout",
+    504,
+    `The AI took too long to respond (over ${MODEL_TIMEOUT_MS / 1000}s). Please try again.`
+  );
+
+function toChatError(error, meta) {
+  if (error instanceof ChatError) return error;
+  if (error?.name === "AbortError") return timeoutError();
+  meta.errorDetail = [error?.message, error?.cause?.code].filter(Boolean).join(" / ");
+  return new ChatError("unreachable", 502, "Could not reach the AI service. Please try again.");
+}
+
+// One JSON log line per request for Vercel Runtime Logs. Never includes the API
+// key or any message text; only sizes, timings and outcomes.
+function logRequest(meta) {
+  const { startedAt, ...fields } = meta;
+  const line = JSON.stringify({ event: "chat", ...fields, totalMs: Date.now() - startedAt });
+  if (meta.outcome === "ok") console.log(line);
+  else console.error(line);
+}
+
+async function callModel({ baseUrl, apiKey, messages, meta }) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), MODEL_TIMEOUT_MS);
-  try {
+  let timer;
+  // The deadline is a race, not only an abort signal, so the client gets an answer
+  // even if the socket never reacts to the abort.
+  const deadline = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      reject(timeoutError());
+    }, MODEL_TIMEOUT_MS);
+  });
+
+  const exchange = (async () => {
     const response = await fetch(`${baseUrl}/chat/completions`, {
       method: "POST",
       headers: {
@@ -95,32 +143,77 @@ async function callModel({ baseUrl, apiKey, model, messages }) {
         "Content-Type": "application/json",
         Accept: "application/json",
       },
-      body: JSON.stringify({ model, messages, temperature: 0.35, max_tokens: MAX_OUTPUT_TOKENS }),
+      body: JSON.stringify({
+        model: MODEL,
+        messages,
+        temperature: 0.35,
+        max_tokens: MAX_OUTPUT_TOKENS,
+        reasoning_effort: REASONING_EFFORT,
+      }),
       signal: controller.signal,
     });
+    meta.upstreamStatus = response.status;
+    meta.headersMs = Date.now() - meta.startedAt;
 
-    const data = await response.json().catch(() => ({}));
+    // Read the body as text under the same signal: a body that stalls is a timeout,
+    // not an "empty response".
+    const raw = await response.text();
+    meta.bodyMs = Date.now() - meta.startedAt;
+
+    let data = null;
+    try {
+      data = JSON.parse(raw);
+    } catch {
+      meta.rawSnippet = raw.slice(0, 200);
+    }
 
     if (!response.ok) {
-      throw new Error(
-        data?.error?.message || data?.message || `NaraRouter returned HTTP ${response.status}`
+      meta.errorDetail = data?.error?.message || data?.message || meta.rawSnippet || "";
+      meta.upstreamRequestId = data?.error?.request_id;
+      if (response.status === 429) {
+        throw new ChatError(
+          "rate_limited",
+          429,
+          "The AI service is busy right now. Please try again in a moment."
+        );
+      }
+      throw new ChatError(
+        "upstream_error",
+        502,
+        `The AI service returned an error (HTTP ${response.status})${
+          meta.errorDetail ? `: ${meta.errorDetail}` : "."
+        }`
       );
     }
 
-    const choice = data?.choices?.[0];
+    if (!data) {
+      throw new ChatError("bad_response", 502, "The AI service returned an unreadable response.");
+    }
+
+    const choice = data.choices?.[0];
+    meta.finishReason = choice?.finish_reason;
+    meta.promptTokens = data.usage?.prompt_tokens;
+    meta.completionTokens = data.usage?.completion_tokens;
+    meta.reasoningTokens = data.usage?.completion_tokens_details?.reasoning_tokens;
+    meta.hadReasoning = Boolean(choice?.message?.reasoning_content || choice?.message?.reasoning);
+
     const reply = choice?.message?.content?.trim();
     if (!reply) {
-      throw new Error(
+      throw new ChatError(
+        "empty_reply",
+        502,
         choice?.finish_reason === "length"
-          ? "empty response (token limit reached before the answer)"
-          : "empty response"
+          ? "The AI ran out of tokens before answering. Please try again."
+          : "The AI returned an empty answer. Please try again."
       );
     }
     return reply;
+  })();
+
+  try {
+    return await Promise.race([exchange, deadline]);
   } catch (error) {
-    throw new Error(
-      error?.name === "AbortError" ? "request timed out" : error?.message || "request failed"
-    );
+    throw toChatError(error, meta);
   } finally {
     clearTimeout(timer);
   }
@@ -138,6 +231,7 @@ export default async function handler(req, res) {
   const baseUrl = (process.env.NARA_ROUTER_BASE_URL || DEFAULT_BASE_URL).replace(/\/+$/, "");
 
   if (!apiKey) {
+    console.error(JSON.stringify({ event: "chat_config_error", problem: "NARA_ROUTER_API_KEY is not set" }));
     return res.status(500).json({ error: "NARA_ROUTER_API_KEY is not configured in Vercel." });
   }
 
@@ -148,13 +242,24 @@ export default async function handler(req, res) {
   }
 
   const messages = [{ role: "system", content: SYSTEM_PROMPT }, ...history];
+  const requestId = req.headers?.["x-vercel-id"] || randomUUID();
+  const meta = {
+    requestId,
+    model: MODEL,
+    reasoningEffort: REASONING_EFFORT,
+    historyMessages: history.length,
+    startedAt: Date.now(),
+  };
 
   try {
-    const reply = await callModel({ baseUrl, apiKey, model: MODEL, messages });
+    const reply = await callModel({ baseUrl, apiKey, messages, meta });
+    meta.outcome = "ok";
+    meta.replyChars = reply.length;
+    logRequest(meta);
     return res.status(200).json({ reply, model: MODEL });
   } catch (error) {
-    const message = `${MODEL}: ${error.message}`;
-    console.error("NaraRouter call failed:", message);
-    return res.status(502).json({ error: message });
+    meta.outcome = error.code;
+    logRequest(meta);
+    return res.status(error.status).json({ error: error.message, code: error.code, requestId });
   }
 }

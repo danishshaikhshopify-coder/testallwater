@@ -135,29 +135,33 @@ function setBusy(v){busy=v;send.disabled=v;input.disabled=v;typing.classList.tog
 async function ask(text){
  if(!text||busy)return;
  addMessage('user',text);history.push({role:'user',content:text});setBusy(true);
+ /* The abort timer must cover the whole exchange (headers AND body), so it is
+    only cleared in finally. Likewise the thinking state is always reset there. */
+ const controller=new AbortController();
+ const timer=setTimeout(()=>controller.abort(),58000);
  try{
-  const controller=new AbortController();
-  const timer=setTimeout(()=>controller.abort(),58000);
   const res=await fetch("/api/chat",{
     method:"POST",
     headers:{"Content-Type":"application/json","Accept":"application/json"},
     body:JSON.stringify({messages:history.slice(-12)}),
     signal:controller.signal
   });
-  clearTimeout(timer);
-  const data=await res.json().catch(()=>({}));
+  const data=await res.json().catch(e=>{if(e?.name==="AbortError")throw e;return {}});
   if(!res.ok) throw new Error(data?.error||`Server error (${res.status})`);
   const reply=data?.reply?.trim();
   if(!reply) throw new Error("The AI returned an empty response.");
   history.push({role:"assistant",content:reply});
-  addMessage("assistant",reply);}catch(e){
-  console.error("NaraRouter request failed:",e);
+  addMessage("assistant",reply);
+ }catch(e){
+  console.error("AI request failed:",e);
   const msg=e?.name==="AbortError"
-    ?"The AI request timed out."
+    ?"The AI took too long to respond."
     :(e?.message||"Unknown API error");
-  addMessage("assistant","AI request failed:\n"+msg+"\n\nPlease check the Vercel API function and NaraRouter environment variables.");
-}
- setBusy(false);input.focus();
+  addMessage("assistant","AI request failed:\n"+msg+(/try again/i.test(msg)?"":"\n\nPlease try again."));
+ }finally{
+  clearTimeout(timer);
+  setBusy(false);input.focus();
+ }
 }
 document.getElementById('closeAI').onclick=()=>{panel.classList.remove('open');panel.setAttribute('aria-hidden','true')}
 document.getElementById('form').onsubmit=e=>{e.preventDefault();const t=input.value.trim();if(t){input.value='';ask(t)}}
