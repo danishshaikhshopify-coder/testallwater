@@ -130,23 +130,33 @@ test("accepts a JSON string body", async () => {
   assert.equal(res.statusCode, 200);
 });
 
-test("falls back to auto/bynara when the first model fails", async () => {
-  mockUpstream({ status: 500, body: { error: { message: "boom" } } }, ok("from fallback model"));
-  const res = await call({ body: { messages: [{ role: "user", content: "hi" }] } });
-
-  assert.equal(res.statusCode, 200);
-  assert.equal(res.payload.reply, "from fallback model");
-  assert.equal(res.payload.model, "auto/bynara");
-  assert.deepEqual(upstreamCalls.map((c) => c.body.model), ["deepseek-v4-flash", "auto/bynara"]);
-});
-
-test("returns 502 with the upstream error when every model fails (no canned reply)", async () => {
-  mockUpstream(new Error("network down"), { status: 200, body: { choices: [{ message: { content: "" } }] } });
+test("only ever calls deepseek-v4-flash, with no retry on another model", async () => {
+  mockUpstream({ status: 500, body: { error: { message: "boom" } } }, ok("must never be reached"));
   const res = await call({ body: { messages: [{ role: "user", content: "hi" }] } });
 
   assert.equal(res.statusCode, 502);
-  assert.match(res.payload.error, /auto\/bynara: empty response/);
+  assert.deepEqual(upstreamCalls.map((c) => c.body.model), ["deepseek-v4-flash"]);
+});
+
+test("returns 502 with the upstream error and no canned reply when the model fails", async () => {
+  mockUpstream({ status: 404, body: { error: { message: "model not found" } } });
+  let res = await call({ body: { messages: [{ role: "user", content: "hi" }] } });
+  assert.equal(res.statusCode, 502);
+  assert.equal(res.payload.error, "deepseek-v4-flash: model not found");
   assert.equal(res.payload.reply, undefined);
+
+  mockUpstream(new Error("network down"));
+  res = await call({ body: { messages: [{ role: "user", content: "hi" }] } });
+  assert.equal(res.statusCode, 502);
+  assert.equal(res.payload.error, "deepseek-v4-flash: network down");
+
+  mockUpstream({ status: 200, body: { choices: [{ message: { content: "" } }] } });
+  res = await call({ body: { messages: [{ role: "user", content: "hi" }] } });
+  assert.equal(res.payload.error, "deepseek-v4-flash: empty response");
+});
+
+test("auto/bynara is not referenced in the API code", () => {
+  assert.doesNotMatch(readFileSync(new URL("api/chat.js", root), "utf8"), /auto\/bynara/);
 });
 
 test("index.html always calls /api/chat and has no key, system prompt, or demo fallback", () => {

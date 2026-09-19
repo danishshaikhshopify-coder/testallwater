@@ -1,9 +1,9 @@
 const DEFAULT_BASE_URL = "https://router.bynara.id/v1";
-const MODELS = ["deepseek-v4-flash", "auto/bynara"];
+const MODEL = "deepseek-v4-flash";
 
-// Two sequential attempts must fit inside maxDuration (60s, see vercel.json)
-// and finish before the browser gives up (58s, see index.html).
-const PER_MODEL_TIMEOUT_MS = 25000;
+// Must finish inside maxDuration (60s, see vercel.json) and before the browser
+// gives up (58s, see index.html).
+const MODEL_TIMEOUT_MS = 25000;
 const MAX_HISTORY_MESSAGES = 12;
 const MAX_MESSAGE_CHARS = 4000;
 
@@ -82,7 +82,7 @@ function sanitizeHistory(incoming) {
 
 async function callModel({ baseUrl, apiKey, model, messages }) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), PER_MODEL_TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), MODEL_TIMEOUT_MS);
   try {
     const response = await fetch(`${baseUrl}/chat/completions`, {
       method: "POST",
@@ -137,17 +137,13 @@ export default async function handler(req, res) {
   }
 
   const messages = [{ role: "system", content: SYSTEM_PROMPT }, ...history];
-  let lastError = null;
 
-  for (const model of MODELS) {
-    try {
-      const reply = await callModel({ baseUrl, apiKey, model, messages });
-      return res.status(200).json({ reply, model });
-    } catch (error) {
-      lastError = new Error(`${model}: ${error.message}`);
-      console.error("NaraRouter call failed:", lastError.message);
-    }
+  try {
+    const reply = await callModel({ baseUrl, apiKey, model: MODEL, messages });
+    return res.status(200).json({ reply, model: MODEL });
+  } catch (error) {
+    const message = `${MODEL}: ${error.message}`;
+    console.error("NaraRouter call failed:", message);
+    return res.status(502).json({ error: message });
   }
-
-  return res.status(502).json({ error: lastError?.message || "NaraRouter request failed." });
 }
