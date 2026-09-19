@@ -23,6 +23,7 @@ const REASONING_EFFORT = "none";
 const ATTEMPT_TIMEOUT_MS = 9000;
 const MAX_ATTEMPTS = 2;
 const MAX_OUTPUT_TOKENS = 1000;
+const MIN_REPLY_ALNUM = 4; // a reply with fewer letters/digits than this is a truncated glitch
 const MAX_HISTORY_MESSAGES = 12;
 const MAX_MESSAGE_CHARS = 4000;
 
@@ -340,6 +341,11 @@ async function attemptOnce({ baseUrl, apiKey, messages, meta }) {
     if (unwrapped) meta.unwrappedJson = unwrapped;
     if (text === null) {
       throw new ChatError("bad_response", 502, "The AI service returned an unreadable response.");
+    }
+    // The model occasionally stops after a token or two ("{", "For"): never show that.
+    if (text.replace(/[^\p{L}\p{N}]/gu, "").length < MIN_REPLY_ALNUM) {
+      meta.degenerateReply = true;
+      throw new ChatError("empty_reply", 502, "The AI returned an empty answer. Please try again.");
     }
     return text;
   })();

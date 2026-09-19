@@ -149,7 +149,7 @@ test("forwards the real upstream reply, server-side key, and trimmed base URL", 
 });
 
 test("sends full conversation history, in order, after the server system prompt", async () => {
-  mockUpstream(ok("ok"));
+  mockUpstream(ok("Sure, happy to help."));
   const history = [
     { role: "user", content: "pool" },
     { role: "assistant", content: "routine or troubleshooting?" },
@@ -164,7 +164,7 @@ test("sends full conversation history, in order, after the server system prompt"
 });
 
 test("drops client-supplied system messages", async () => {
-  mockUpstream(ok("ok"));
+  mockUpstream(ok("Sure, happy to help."));
   await call({
     body: {
       messages: [
@@ -180,7 +180,7 @@ test("drops client-supplied system messages", async () => {
 });
 
 test("caps history length and per-message size", async () => {
-  mockUpstream(ok("ok"));
+  mockUpstream(ok("Sure, happy to help."));
   const messages = Array.from({ length: 30 }, (_, i) => ({
     role: i % 2 === 0 ? "user" : "assistant",
     content: `m${i}`,
@@ -194,7 +194,7 @@ test("caps history length and per-message size", async () => {
 });
 
 test("accepts a JSON string body", async () => {
-  mockUpstream(ok("ok"));
+  mockUpstream(ok("Sure, happy to help."));
   const res = await call({ body: JSON.stringify({ messages: [{ role: "user", content: "hi" }] }) });
   assert.equal(res.statusCode, 200);
 });
@@ -269,7 +269,7 @@ const CONFIGURED_EFFORT = /const REASONING_EFFORT = "([^"]+)"/.exec(readFileSync
 
 test("sends the configured, documented reasoning_effort (never the default depth)", async () => {
   assert.ok(["none", "minimal", "low"].includes(CONFIGURED_EFFORT), `unexpected effort ${CONFIGURED_EFFORT}`);
-  mockUpstream(ok("ok"));
+  mockUpstream(ok("Sure, happy to help."));
   await call(HI);
   assert.equal(upstreamCalls[0].body.reasoning_effort, CONFIGURED_EFFORT);
 });
@@ -459,7 +459,7 @@ test("logs failures at error level with per-attempt outcomes and timings", async
 });
 
 test("uses Vercel's request id for log correlation when present", async () => {
-  mockUpstream(ok("ok"));
+  mockUpstream(ok("Sure, happy to help."));
   const res = { headers: {}, setHeader() {}, status(c) { this.statusCode = c; return this; }, json(p) { this.payload = p; return this; } };
   await handler({ method: "POST", headers: { "x-vercel-id": "bom1::abc" }, body: HI.body }, res);
   assert.equal(JSON.parse(logs.out[0]).requestId, "bom1::abc");
@@ -477,7 +477,7 @@ test("a JSON reply with a prose field shows just that text, whichever key the mo
     ['{"assistantMessage":"Urgent: test ammonia and nitrite now."}', "Urgent: test ammonia and nitrite now."],
     ['{"reply":"  padded  "}', "padded"],
     ['{"text":"via text key"}', "via text key"],
-    ['{"answer":"A","message":"B"}', "B"], // fixed key priority, not object order
+    ['{"answer":"From the answer key","message":"From the message key"}', "From the message key"], // fixed key priority, not object order
     ['{"message":"  ","response":"used the non-blank one"}', "used the non-blank one"],
     ['{"question":"Is this a freshwater or saltwater aquarium?"}', "Is this a freshwater or saltwater aquarium?"],
     // cut off before the closing brace (this exact reply leaked on the live site)
@@ -551,6 +551,29 @@ test("JSON that cannot be rendered is an error, never shown to the customer", as
   }
 });
 
+// Seen live: a reply that was just "{" and two replies that were just "For".
+test("a truncated one-token reply is an error, not a broken chat bubble", async () => {
+  for (const raw of ["{", "For", "  {  ", "...", "ok", "[", '""']) {
+    logs.out.length = 0;
+    logs.err.length = 0;
+    mockUpstream(ok(raw));
+    const res = await call(HI);
+    assert.equal(res.statusCode, 502, JSON.stringify(raw));
+    assert.equal(res.payload.code, "empty_reply");
+    assert.equal(res.payload.reply, undefined);
+    assert.equal(JSON.parse(logs.err[0]).degenerateReply, true);
+    assert.equal(upstreamCalls.length, 1, "a degenerate answer is an answer: it is not retried");
+  }
+
+  // short but real replies still pass
+  for (const raw of ["Yes, that works.", "Test pH first.", "Sure thing!", "Use strips."]) {
+    mockUpstream(ok(raw));
+    const res = await call(HI);
+    assert.equal(res.statusCode, 200, raw);
+    assert.equal(res.payload.reply, raw);
+  }
+});
+
 test("replies that are not a JSON object are left exactly as written", async () => {
   const untouched = [
     "Plain answer",
@@ -559,8 +582,8 @@ test("replies that are not a JSON object are left exactly as written", async () 
     "Use {braces} carefully",
     'Prefix {"message":"x"}',
     '{"message":"x"} and then more prose',
-    "[1, 2, 3]",
-    '["a","b"]',
+    "[1, 2, 3, 4, 5]",
+    '["ammonia","nitrite"]',
     "```json\n{\"message\":\"in a code block\"}\n```",
   ];
   for (const text of untouched) {
@@ -581,7 +604,7 @@ const sentRoles = () => upstreamCalls[0].body.messages.map((m) => m.role[0]).joi
 const sentSystem = () => upstreamCalls[0].body.messages[0].content;
 
 test("the same message sent again after an answer is flagged to the model as a repeat", async () => {
-  mockUpstream(ok("ok"));
+  mockUpstream(ok("Sure, happy to help."));
   const res = await call({ body: { messages: [u(MSG), a("Which test kit do you have?"), u(MSG)] } });
 
   assert.equal(res.statusCode, 200);
@@ -597,7 +620,7 @@ test("the same message sent again after an answer is flagged to the model as a r
 });
 
 test("a first-time message is not flagged, and the base prompt tells the model to use the conversation", async () => {
-  mockUpstream(ok("ok"));
+  mockUpstream(ok("Sure, happy to help."));
   await call({ body: { messages: [u(MSG)] } });
   assert.doesNotMatch(sentSystem(), /REPEATED MESSAGE/);
   assert.match(sentSystem(), /Use the whole conversation/);
@@ -607,12 +630,12 @@ test("a first-time message is not flagged, and the base prompt tells the model t
 
 test("repeat detection ignores case, spacing and end punctuation, and finds non-adjacent repeats", async () => {
   for (const again of ["  my POOL water   is cloudy and i use chlorine!! ", "My pool water is cloudy and I use chlorine."]) {
-    mockUpstream(ok("ok"));
+    mockUpstream(ok("Sure, happy to help."));
     await call({ body: { messages: [u(MSG), a("Which kit?"), u(again)] } });
     assert.match(sentSystem(), /REPEATED MESSAGE/, `not detected: ${again}`);
   }
 
-  mockUpstream(ok("ok"));
+  mockUpstream(ok("Sure, happy to help."));
   await call({ body: { messages: [u(MSG), a("Which kit?"), u("It is green too"), a("Since when?"), u(MSG)] } });
   assert.match(sentSystem(), /REPEATED MESSAGE/);
 });
@@ -624,14 +647,14 @@ test("different messages, and short replies like 'yes', are never flagged", asyn
     [u("chlorine"), a("Is it outdoors?"), u("Chlorine")],
   ];
   for (const messages of cases) {
-    mockUpstream(ok("ok"));
+    mockUpstream(ok("Sure, happy to help."));
     await call({ body: { messages } });
     assert.doesNotMatch(sentSystem(), /REPEATED MESSAGE/);
   }
 });
 
 test("a message resent after a failure (no AI reply in between) is sent once and not flagged", async () => {
-  mockUpstream(ok("ok"));
+  mockUpstream(ok("Sure, happy to help."));
   await call({ body: { messages: [u(MSG), u(MSG)] } });
   assert.equal(sentRoles(), "su", "the unanswered first copy is collapsed");
   assert.doesNotMatch(sentSystem(), /REPEATED MESSAGE/);
@@ -640,19 +663,19 @@ test("a message resent after a failure (no AI reply in between) is sent once and
   assert.equal(entry.repeatedMessage, undefined);
 
   // three failed attempts in a row collapse to one
-  mockUpstream(ok("ok"));
+  mockUpstream(ok("Sure, happy to help."));
   await call({ body: { messages: [u(MSG), u(MSG), u(MSG)] } });
   assert.equal(sentRoles(), "su");
 
   // a resend after an earlier answered turn: context kept, still not a repeat
-  mockUpstream(ok("ok"));
+  mockUpstream(ok("Sure, happy to help."));
   await call({ body: { messages: [u("first"), a("hello"), u(MSG), u(MSG)] } });
   assert.equal(sentRoles(), "suau");
   assert.doesNotMatch(sentSystem(), /REPEATED MESSAGE/);
 });
 
 test("a different message after a failed one keeps the failed message as context", async () => {
-  mockUpstream(ok("ok"));
+  mockUpstream(ok("Sure, happy to help."));
   await call({ body: { messages: [u(MSG), u("It has been green for 3 days")] } });
   assert.equal(sentRoles(), "suu");
   assert.equal(upstreamCalls[0].body.messages[1].content, MSG);
@@ -674,7 +697,7 @@ test("timeout recovery: after a double timeout the next request succeeds normall
 });
 
 test("caps output at 1000 tokens", async () => {
-  mockUpstream(ok("ok"));
+  mockUpstream(ok("Sure, happy to help."));
   await call(HI);
   assert.equal(upstreamCalls[0].body.max_tokens, 1000);
 });
