@@ -232,10 +232,13 @@ test("explains an empty reply caused by the token limit", async () => {
   assert.match(res.payload.error, /ran out of tokens/);
 });
 
-test("disables reasoning with reasoning_effort none", async () => {
+const CONFIGURED_EFFORT = /const REASONING_EFFORT = "([^"]+)"/.exec(readFileSync(new URL("../api/chat.js", import.meta.url), "utf8"))[1];
+
+test("sends the configured, documented reasoning_effort (never the default depth)", async () => {
+  assert.ok(["none", "minimal", "low"].includes(CONFIGURED_EFFORT), `unexpected effort ${CONFIGURED_EFFORT}`);
   mockUpstream(ok("ok"));
   await call(HI);
-  assert.equal(upstreamCalls[0].body.reasoning_effort, "none");
+  assert.equal(upstreamCalls[0].body.reasoning_effort, CONFIGURED_EFFORT);
 });
 
 test("maps a NaraRouter 429 to a friendly 429", async () => {
@@ -306,7 +309,7 @@ test("logs one structured line per request, without the key or message text", as
   assert.equal(entry.event, "chat");
   assert.equal(entry.outcome, "ok");
   assert.equal(entry.model, "nemotron-3.5-lightning-free");
-  assert.equal(entry.reasoningEffort, "none");
+  assert.equal(entry.reasoningEffort, CONFIGURED_EFFORT);
   assert.equal(entry.upstreamStatus, 200);
   assert.equal(entry.finishReason, "stop");
   assert.equal(entry.reasoningTokens, 20);

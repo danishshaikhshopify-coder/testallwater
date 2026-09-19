@@ -5,9 +5,11 @@ const DEFAULT_BASE_URL = "https://router.bynara.id/v1";
 const MODEL = "nemotron-3.5-lightning-free";
 
 // It is a reasoning model, but this is simple customer-support chat, so thinking is
-// disabled ("none", per NaraRouter's docs). At default depth replies took 22s to 50s+,
-// and at "low" they still hit the deadline about one time in three.
-const REASONING_EFFORT = "none";
+// kept to the minimum. At default depth replies took 22s to 50s+, and at "low" about
+// one in three still hit the deadline. NOTE: "none" (documented as "off") made
+// NaraRouter's origin fail every request for this model with a Cloudflare 502
+// ("origin returned an invalid or incomplete response") within ~1.5s, so it is not used.
+const REASONING_EFFORT = "minimal";
 
 // The whole upstream exchange (connect + headers + body) gets one hard deadline. It
 // must finish before the browser gives up (30s, see index.html) and well inside
